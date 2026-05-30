@@ -6,6 +6,8 @@ RUN pip install --no-cache-dir requests
 
 COPY collect_snapshots.py .
 
+USER 1000
+
 VOLUME ["/app/snapshots"]
 
 ENV CAM_SNAPSHOT_URL=http://192.168.x.x/

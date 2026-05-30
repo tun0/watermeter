@@ -2,7 +2,7 @@ services:
   collector:
     build:
       context: .
-      dockerfile: Dockerfile.collector
+      dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       CAM_SNAPSHOT_URL: ${CAM_SNAPSHOT_URL:-http://192.168.x.x/}
