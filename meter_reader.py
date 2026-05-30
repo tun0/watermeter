@@ -40,7 +40,7 @@ DIGITAL_DIGITS = [
     (252, 124, 41, 55),   # 10,000 m³ digit (normally 0)
     (310, 126, 40, 55),
     (368, 127, 35, 53),
-    (423, 124, 33, 55),
+    (423, 129, 33, 50),   # top trimmed 5px — removes frame noise that broke "9" OCR
     (480, 124, 34, 54),
 ]
 
@@ -104,7 +104,6 @@ def _ocr_single_digit(crop: np.ndarray) -> int | None:
     gray = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
 
     cfg = r"--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789"
-    best_conf, best_digit = -1, None
 
     for invert in (False, True):
         src = 255 - gray if invert else gray
@@ -116,10 +115,10 @@ def _ocr_single_digit(crop: np.ndarray) -> int | None:
             thresh, config=cfg, output_type=pytesseract.Output.DICT)
         for text, conf in zip(data["text"], data["conf"]):
             text = text.strip()
-            if text.isdigit() and int(conf) > best_conf:
-                best_conf, best_digit = int(conf), int(text)
+            if text.isdigit():
+                return int(text)
 
-    return best_digit
+    return None
 
 
 def read_digital_digits(img: np.ndarray) -> list[int | None]:
@@ -136,11 +135,14 @@ def read_digital_digits(img: np.ndarray) -> list[int | None]:
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
                                 cv2.BORDER_CONSTANT, value=255)
-    for psm in (8, 7, 6):
+    n = len(DIGITAL_DIGITS)
+    for psm in (7, 6, 8):
         cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
         result = pytesseract.image_to_string(thresh, config=cfg).strip()
-        if len(result) == len(DIGITAL_DIGITS) and result.isdigit():
-            return [int(c) for c in result]
+        # Accept up to 2 missing leading zeros — the counter left-pads them and
+        # Tesseract often drops them from the strip; zfill restores them.
+        if result.isdigit() and n - 2 <= len(result) <= n:
+            return [int(c) for c in result.zfill(n)]
 
     log.warning("strip OCR gave no clean 5-digit result — falling back to per-digit")
     return [_ocr_single_digit(img[y:y + h, x:x + w])
