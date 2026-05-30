@@ -1,0 +1,12 @@
+services:
+  collector:
+    build:
+      context: .
+      dockerfile: Dockerfile.collector
+    restart: unless-stopped
+    environment:
+      CAM_SNAPSHOT_URL: ${CAM_SNAPSHOT_URL:-http://192.168.x.x/}
+      CAM_STREAM_URL:   ${CAM_STREAM_URL:-http://192.168.x.x:8080/}
+      COLLECTOR_INTERVAL: ${COLLECTOR_INTERVAL:-10}
+    volumes:
+      - ./snapshots:/app/snapshots

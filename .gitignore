@@ -1,0 +1,8 @@
+snapshots/
+__pycache__/
+*.pyc
+*.pyo
+.meter_state.json
+debug_reading.jpg
+secrets.yaml
+.env
