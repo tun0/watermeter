@@ -4,7 +4,7 @@ meter_reader.py — standalone water meter reader, replacing nohn/watermeter.
 
 Pipeline:
   1. Fetch /raw from overlay-proxy (undistorted, unrotated)
-  2. Rotate 184°
+  2. Rotate 244.6°
   3. OCR the 4 digital digit crops (Tesseract)
   4. Detect 4 analog dial angles (spoke sampling, copied from overlay-proxy)
   5. Apply inter-dial gear-lash correction
@@ -32,29 +32,46 @@ import requests
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PROXY_RAW_URL = "http://localhost:8081/raw"
-ROTATE_DEG    = 184
+ROTATE_DEG    = 243.0
 
-# Digital digit crop boxes in rotated-image coordinates (from config.php)
-# Each entry: (x, y, w, h) — ordered most-significant to least-significant
+# Digital digit crop boxes in rotated-image coordinates.
+# Each entry: (x, y, w, h) — ordered most-significant to least-significant.
+# Recalibrated 2026-06-03 after camera extension (improved focus/DOF).
 DIGITAL_DIGITS = [
-    (252, 124, 41, 55),   # 10,000 m³ digit (normally 0)
-    (310, 126, 40, 55),
-    (368, 127, 35, 53),
-    (423, 129, 33, 50),   # top trimmed 5px — removes frame noise that broke "9" OCR
-    (480, 124, 34, 54),
+    (723, 779, 48, 51),
+    (771, 779, 48, 51),
+    (819, 779, 48, 51),
+    (867, 779, 48, 51),
+    (915, 779, 48, 51),
 ]
 
 # Full strip covering all digital digits; used by the strip OCR path.
-_DIGITAL_STRIP = (252, 124, 263, 57)   # x, y, w, h  (252→515)
+_DIGITAL_STRIP = (723, 779, 240, 51)
 
-# Analog dial definitions: (cx, cy, radius, dark_needle, flip)
-# Ordered most-significant → least-significant
-ANALOG_DIALS = [
-    (671, 288, 69, False, False),
-    (606, 446, 73, False, False),
-    (449, 507, 66, True,  False),
-    (287, 438, 68, True,  False),
+# Analog dial offsets from strip centre: (dx, dy, r, dark_needle, flip)
+# Ordered most-significant → least-significant.
+# Recalibrated 2026-06-03 via interactive calibration at ROTATE_DEG=243.0.
+_ANALOG_DIAL_OFFSETS = [
+    (+267, +138, 65, False, False),  # ×0.1 m³
+    (+204, +286, 63, False, False),  # ×0.01 m³
+    ( +54, +342, 65, False, False),  # ×0.001 m³
+    ( -98, +274, 63, False, False),  # ×0.0001 m³
 ]
+
+def _make_analog_dials():
+    sx, sy, sw, sh = _DIGITAL_STRIP
+    cx, cy = sx + sw // 2, sy + sh // 2
+    return [(cx + dx, cy + dy, r, dk, fl) for dx, dy, r, dk, fl in _ANALOG_DIAL_OFFSETS]
+
+ANALOG_DIALS = _make_analog_dials()
+
+# Mechanical phase correction for analog dials.
+# The gear engagement that drives the next dial happens when the driving dial
+# reaches face "9", not face "0".  This means face "0" is actually the first
+# graduation PAST the mechanical zero, so all raw digit readings are one digit
+# low.  Applied as a decimal addition (0.1111) so carry propagates correctly:
+# e.g. raw 0.7491 + 0.1111 = 0.8602, not the broken per-digit 0.8502.
+DIAL_PHASE_CORRECTION = 0.1111
 
 # Gear-lash correction thresholds.
 # LASH_HIGH: more-significant dial frac above this → approaching next digit, snap up.
@@ -138,9 +155,10 @@ def read_digital_digits(img: np.ndarray) -> list[int | None]:
     n = len(DIGITAL_DIGITS)
     for psm in (7, 6, 8):
         cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
-        result = pytesseract.image_to_string(thresh, config=cfg).strip()
+        result = "".join(pytesseract.image_to_string(thresh, config=cfg).split())
         # Accept up to 2 missing leading zeros — the counter left-pads them and
         # Tesseract often drops them from the strip; zfill restores them.
+        # Internal spaces are removed above so "0 2 5" → "025" before the check.
         if result.isdigit() and n - 2 <= len(result) <= n:
             return [int(c) for c in result.zfill(n)]
 
@@ -311,7 +329,129 @@ def assemble_reading(digital: list[int | None],
         else:
             analog_digits.append(_round_last(a))
     fractional = sum(d * 10 ** -(i + 1) for i, d in enumerate(analog_digits))
+    fractional = round(fractional + DIAL_PHASE_CORRECTION, 4) % 1.0
     return round(integer_part + fractional, 4)
+
+
+# ── Rollover calibration and disambiguation ────────────────────────────────────
+#
+# At every integer-digit rollover (N→N+1 m³), all four analog dials return to
+# their mechanical zero simultaneously.  Recording each dial's raw angle at that
+# moment gives its zero offset.  Accuracy degrades for faster dials because the
+# 19-minute drum-transition window lets them advance:
+#   A0 (×0.1)  : ~0.4° error  → reliable
+#   A1 (×0.01) : ~3.6° error  → usable
+#   A2 (×0.001): ~36°  error  → poor, skip
+#   A3 (×0.0001): ~360° error → skip entirely
+#
+# Once A0 and A1 are calibrated, they resolve OCR ambiguity during the slow
+# mechanical transition of the units (pos4) and tens (pos3) digits respectively.
+
+# dial index → digital position it drives
+_DIAL_DRIVES_POS = {0: 4, 1: 3, 2: 2, 3: 1}
+# digital position → dial index that drives it
+_POS_DRIVEN_BY_DIAL = {v: k for k, v in _DIAL_DRIVES_POS.items()}
+# Dials reliable enough to calibrate and use for disambiguation
+_CALIBRATE_DIALS = (0, 1)
+
+# Fraction of a revolution within which we declare "just crossed zero" or
+# "about to cross zero" for rollover disambiguation.
+_ROLLOVER_BAND = 0.15
+
+
+def _dial_fraction(raw_angle: float | None, zero_offset: float | None) -> float | None:
+    """Fractional position 0.0–1.0 relative to calibrated zero. None if uncalibrated."""
+    if raw_angle is None or zero_offset is None:
+        return None
+    return ((raw_angle - zero_offset) % 360) / 360.0
+
+
+def calibrate_from_rollover(digital: list[int | None],
+                            angles: list[float | None],
+                            state: dict) -> dict:
+    """
+    Called after a reading is accepted. If the integer part incremented by 1,
+    record dial angles as zero offsets.  Returns updated state (not yet saved).
+    """
+    last = state.get("last_reading")
+    if last is None or any(d is None for d in digital):
+        return state
+
+    last_int = int(last)
+    new_int  = int("".join(str(d) for d in digital))
+
+    if new_int != last_int + 1:
+        return state
+
+    # The first clean new-digit frame is captured when the digit drum has just
+    # become readable but may not yet be fully settled.  The mechanical carry
+    # completes one dial graduation (36°) later — at the face "1" position rather
+    # than face "0".  Apply a fixed +36° phase correction to align the stored
+    # zero with the true mechanical completion point.
+    _CARRY_PHASE_DEG = 36.0
+
+    offsets = state.setdefault("dial_zero_offsets", [None] * 4)
+    for dial_idx in _CALIBRATE_DIALS:
+        if dial_idx < len(angles) and angles[dial_idx] is not None:
+            corrected = (angles[dial_idx] + _CARRY_PHASE_DEG) % 360
+            offsets[dial_idx] = corrected
+            log.info("dial calibration: A%d (×%s) zero=%.1f°  (%d→%d rollover, +%.0f° phase)",
+                     dial_idx, ["0.1", "0.01", "0.001", "0.0001"][dial_idx],
+                     corrected, last_int, new_int, _CARRY_PHASE_DEG)
+
+    return state
+
+
+def resolve_rollover(digital: list[int | None],
+                     angles: list[float | None],
+                     state: dict) -> list[int | None]:
+    """
+    When OCR catches a digit mid-transition (showing old or new value), use the
+    corresponding dial's calibrated fraction to decide which is correct:
+      fraction < _ROLLOVER_BAND  → dial just crossed zero → digit already incremented
+      fraction > 1-_ROLLOVER_BAND → dial about to cross zero → digit not yet incremented
+    Only acts when the OCR digit is plausibly one of the two transition values.
+    """
+    last = state.get("last_reading")
+    if last is None or any(d is None for d in digital):
+        return digital
+
+    offsets   = state.get("dial_zero_offsets", [None] * 4)
+    last_digs = [int(c) for c in f"{int(last):05d}"]
+    result    = list(digital)
+
+    for pos, dial_idx in _POS_DRIVEN_BY_DIAL.items():
+        if dial_idx not in _CALIBRATE_DIALS:
+            continue
+        d      = result[pos]
+        last_d = last_digs[pos]
+        if d is None:
+            continue
+
+        expected_old = last_d
+        expected_new = (last_d + 1) % 10
+
+        if d not in (expected_old, expected_new):
+            continue  # clearly wrong digit, leave for the guard
+
+        frac = _dial_fraction(
+            angles[dial_idx] if dial_idx < len(angles) else None,
+            offsets[dial_idx])
+        if frac is None:
+            continue
+
+        if frac < _ROLLOVER_BAND and d == expected_old:
+            # Dial has crossed zero but OCR still sees old digit → correct up
+            result[pos] = expected_new
+            log.info("rollover assist: pos%d OCR=%d → %d  (A%d frac=%.3f, past zero)",
+                     pos, d, expected_new, dial_idx, frac)
+        elif frac > 1 - _ROLLOVER_BAND and d == expected_new:
+            # Dial hasn't crossed zero yet but OCR shows new digit → correct down
+            result[pos] = expected_old
+            log.info("rollover assist: pos%d OCR=%d → %d  (A%d frac=%.3f, before zero)",
+                     pos, d, expected_old, dial_idx, frac)
+
+    return result
 
 
 # ── Sanity guards ──────────────────────────────────────────────────────────────
@@ -364,12 +504,21 @@ def annotate(img: np.ndarray, digital: list[int | None],
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
-def process(img: np.ndarray, debug: bool = False) -> float:
-    rotated      = rotate_image(img, ROTATE_DEG)
-    digital      = read_digital_digits(rotated)
-    angles_raw   = read_analog_dials(rotated)
-    angles_cor   = correct_gear_lash(angles_raw)
-    reading      = assemble_reading(digital, angles_cor)
+def process(img: np.ndarray, debug: bool = False,
+            state: dict | None = None) -> tuple[float, list, list]:
+    """
+    Returns (reading, digital, angles_cor).
+    Pass `state` to enable rollover disambiguation using calibrated dial zeros.
+    """
+    rotated    = rotate_image(img, ROTATE_DEG)
+    digital    = read_digital_digits(rotated)
+    angles_raw = read_analog_dials(rotated)
+    angles_cor = correct_gear_lash(angles_raw)
+
+    if state:
+        digital = resolve_rollover(digital, angles_cor, state)
+
+    reading = assemble_reading(digital, angles_cor)
 
     log.info("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
              digital,
@@ -382,7 +531,7 @@ def process(img: np.ndarray, debug: bool = False) -> float:
         cv2.imwrite("debug_reading.jpg", ann)
         log.info("Annotated image saved to debug_reading.jpg")
 
-    return reading
+    return reading, digital, angles_cor
 
 
 def main() -> None:
@@ -407,19 +556,21 @@ def main() -> None:
         if img is None:
             sys.exit("Failed to decode image from proxy")
 
+    state = load_state()
+
     try:
-        reading = process(img, debug=args.debug)
+        reading, digital, angles_cor = process(img, debug=args.debug, state=state)
     except ValueError as e:
         log.error("%s", e)
         sys.exit(1)
 
     if not args.no_guard:
-        state = load_state()
         ok, reason = validate(reading, state)
         if not ok:
             log.warning("Rejected: %s", reason)
             print(f"REJECTED {reading:.4f}")
             sys.exit(2)
+        state = calibrate_from_rollover(digital, angles_cor, state)
         state["last_reading"] = reading
         save_state(state)
 

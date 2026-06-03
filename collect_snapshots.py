@@ -2,7 +2,6 @@
 """Collect timestamped snapshots directly from the ESP32-CAM for offline testing."""
 
 import os
-import sys
 import time
 import requests
 from datetime import datetime

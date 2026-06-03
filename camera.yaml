@@ -23,7 +23,7 @@ logger:
 
 api:
   encryption:
-    key: !secret api_encryption_key
+    key: !secret home_assistant_key
   services:
     - service: camera_set_param
       variables:
@@ -85,10 +85,10 @@ esp32_camera:
   vsync_pin: GPIO6
   href_pin: GPIO7
   pixel_clock_pin: GPIO13
-  resolution: 800x600
+  resolution: 1600x1200
   jpeg_quality: 12
   max_framerate: 5.0fps
-  idle_framerate: 0.5fps
+  idle_framerate: 1.0fps
   vertical_flip: true
   horizontal_mirror: false
   brightness: 0

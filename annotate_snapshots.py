@@ -24,10 +24,10 @@ import numpy as np
 # Import pipeline from meter_reader
 sys.path.insert(0, str(Path(__file__).parent))
 from meter_reader import (
-    ANALOG_DIALS, DIGITAL_DIGITS, LASH_HIGH, LASH_LOW, MAX_STEP,
+    ANALOG_DIALS, DIGITAL_DIGITS, MAX_STEP,
     rotate_image, read_digital_digits, read_analog_dials,
     correct_gear_lash, assemble_reading, angle_to_digit,
-    ROTATE_DEG,
+    ROTATE_DEG, resolve_rollover,
 )
 
 _LAST_DIAL_IDX = len(ANALOG_DIALS) - 1
@@ -51,6 +51,7 @@ def annotate_image(img: np.ndarray, filename: str = "",
     digital    = read_digital_digits(rotated)
     angles_raw = read_analog_dials(rotated)
     angles_cor = correct_gear_lash(angles_raw)
+    digital    = resolve_rollover(digital, angles_cor, {})
 
     carried_forward = False
     used_float: float | None = None

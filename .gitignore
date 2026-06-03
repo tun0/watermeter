@@ -2,7 +2,15 @@ snapshots/
 __pycache__/
 *.pyc
 *.pyo
+
+# Runtime state
 .meter_state.json
-debug_reading.jpg
 secrets.yaml
 .env
+
+# Generated calibration and debug images
+*.jpg
+*.jpeg
+
+# ESPHome build artifacts
+.esphome/
