@@ -5,6 +5,10 @@ __pycache__/
 
 # Runtime state
 .meter_state.json
+data/
+
+# Contains credentials — fill in from secret.yaml.example
+k8s/secret.yaml
 secrets.yaml
 .env
 

@@ -48,6 +48,7 @@ print(f"Saving to: {session_dir}", flush=True)
 
 count = 0
 while True:
+    t0 = time.monotonic()
     try:
         data = fetch_snapshot()
         fname = os.path.join(session_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg")
@@ -57,4 +58,5 @@ while True:
         print(f"[{count}] {os.path.basename(fname)}", flush=True)
     except Exception as e:
         print(f"[{count}] WARN: {e}", flush=True)
-    time.sleep(INTERVAL)
+    elapsed = time.monotonic() - t0
+    time.sleep(max(0, INTERVAL - elapsed))

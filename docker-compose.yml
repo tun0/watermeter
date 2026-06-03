@@ -10,3 +10,16 @@ services:
       COLLECTOR_INTERVAL: ${COLLECTOR_INTERVAL:-10}
     volumes:
       - ./snapshots:/app/snapshots
+
+  meter_reader:
+    build:
+      context: .
+      dockerfile: Dockerfile.reader
+    restart: unless-stopped
+    environment:
+      CAM_SNAPSHOT_URL: ${CAM_SNAPSHOT_URL:-http://192.168.x.x/}
+      READING_INTERVAL: ${READING_INTERVAL:-10}
+      HA_URL:   ${HA_URL:-}
+      HA_TOKEN: ${HA_TOKEN:-}
+    volumes:
+      - ./data:/app/data

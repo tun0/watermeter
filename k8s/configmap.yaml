@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watermeter-config
+  namespace: watermeter
+data:
+  CAM_SNAPSHOT_URL: "http://192.168.x.x/"
+  CAM_STREAM_URL:   "http://192.168.x.x:8080/"
+  COLLECTOR_INTERVAL: "10"
+  READING_INTERVAL:   "10"

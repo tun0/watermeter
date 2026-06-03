@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    opencv-python-headless \
+    numpy \
+    pytesseract \
+    requests
+
+WORKDIR /app
+
+COPY meter_reader.py .
+
+USER 1000
+
+ENV CAM_SNAPSHOT_URL=http://192.168.x.x/
+ENV READING_INTERVAL=10
+ENV HA_URL=
+ENV HA_TOKEN=
+ENV STATE_FILE=/app/data/.meter_state.json
+
+CMD ["python3", "-u", "meter_reader.py", "--loop"]

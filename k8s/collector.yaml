@@ -1,21 +1,14 @@
 apiVersion: v1
-kind: Namespace
-metadata:
-  name: watermeter
-
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: snapshots
+  name: snapshots-pvc
   namespace: watermeter
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes:
+    - ReadWriteOnce
   resources:
     requests:
       storage: 10Gi
-  # storageClassName: longhorn   # uncomment to pin to a specific class
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,27 +25,25 @@ spec:
       labels:
         app: collector
     spec:
+      securityContext:
+        runAsUser: 1000
       containers:
         - name: collector
-          image: ghcr.io/tun0/watermeter:latest
-          env:
-            - name: CAM_SNAPSHOT_URL
-              value: "http://192.168.x.x/"
-            - name: CAM_STREAM_URL
-              value: "http://192.168.x.x:8080/"
-            - name: COLLECTOR_INTERVAL
-              value: "10"
+          image: ghcr.io/tun0/watermeter/collector:latest
+          envFrom:
+            - configMapRef:
+                name: watermeter-config
           volumeMounts:
             - name: snapshots
               mountPath: /app/snapshots
           resources:
             requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              cpu: 100m
+              cpu: 50m
               memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       volumes:
         - name: snapshots
           persistentVolumeClaim:
-            claimName: snapshots
+            claimName: snapshots-pvc

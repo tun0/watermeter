@@ -22,7 +22,9 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -31,7 +33,10 @@ import pytesseract
 import requests
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-PROXY_RAW_URL = "http://localhost:8081/raw"
+CAM_SNAPSHOT_URL = os.environ.get("CAM_SNAPSHOT_URL", "http://192.168.x.x/")
+HA_URL           = os.environ.get("HA_URL", "")
+HA_TOKEN         = os.environ.get("HA_TOKEN", "")
+READING_INTERVAL = float(os.environ.get("READING_INTERVAL", "10"))
 ROTATE_DEG    = 243.0
 
 # Digital digit crop boxes in rotated-image coordinates.
@@ -89,7 +94,8 @@ LASH_NEAR_ZERO = 0.90
 MAX_STEP       = 2.0    # reject reading jumps larger than this (m³)
 ALLOW_DECREASE = False
 
-STATE_FILE = Path(__file__).parent / ".meter_state.json"
+STATE_FILE = Path(os.environ.get("STATE_FILE",
+                  str(Path(__file__).parent / ".meter_state.json")))
 
 log = logging.getLogger(__name__)
 
@@ -503,6 +509,33 @@ def annotate(img: np.ndarray, digital: list[int | None],
     return out
 
 
+# ── Home Assistant integration ─────────────────────────────────────────────────
+def push_to_ha(reading: float) -> None:
+    if not HA_URL or not HA_TOKEN:
+        return
+    try:
+        resp = requests.post(
+            f"{HA_URL}/api/states/sensor.water_meter",
+            json={
+                "state": f"{reading:.4f}",
+                "attributes": {
+                    "unit_of_measurement": "m³",
+                    "device_class": "water",
+                    "state_class": "total_increasing",
+                    "friendly_name": "Water Meter",
+                },
+            },
+            headers={
+                "Authorization": f"Bearer {HA_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("HA push failed: %s", e)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def process(img: np.ndarray, debug: bool = False,
             state: dict | None = None) -> tuple[float, list, list]:
@@ -534,47 +567,76 @@ def process(img: np.ndarray, debug: bool = False,
     return reading, digital, angles_cor
 
 
+def _fetch_image(image_path: str | None) -> np.ndarray:
+    if image_path:
+        img = cv2.imread(image_path)
+        if img is None:
+            raise RuntimeError(f"Cannot read image: {image_path}")
+        return img
+    r = requests.get(CAM_SNAPSHOT_URL, timeout=15)
+    r.raise_for_status()
+    arr = np.frombuffer(r.content, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError("Failed to decode image from camera")
+    return img
+
+
+def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | None:
+    """Fetch, process, validate, push. Returns accepted reading or None."""
+    state = load_state()
+    try:
+        img = _fetch_image(image_path)
+        reading, digital, angles_cor = process(img, debug=debug, state=state)
+    except (ValueError, RuntimeError) as e:
+        log.error("%s", e)
+        return None
+
+    if no_guard:
+        print(f"{reading:.4f}")
+        push_to_ha(reading)
+        return reading
+
+    ok, reason = validate(reading, state)
+    if not ok:
+        log.warning("Rejected: %s", reason)
+        return None
+
+    state = calibrate_from_rollover(digital, angles_cor, state)
+    state["last_reading"] = reading
+    save_state(state)
+    print(f"{reading:.4f}", flush=True)
+    push_to_ha(reading)
+    return reading
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Read water meter from overlay-proxy snapshot.")
-    ap.add_argument("--image",    help="Load from file instead of live proxy")
+    ap = argparse.ArgumentParser(description="Read water meter from camera.")
+    ap.add_argument("--image",    help="Load from file instead of live camera")
     ap.add_argument("--debug",    action="store_true", help="Write debug_reading.jpg")
     ap.add_argument("--no-guard", action="store_true", help="Skip sanity guards")
+    ap.add_argument("--loop",     action="store_true",
+                    help="Run continuously on a fixed interval (READING_INTERVAL env var)")
+    ap.add_argument("--interval", type=float, default=None,
+                    help="Override READING_INTERVAL (seconds, default 10)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.image:
-        img = cv2.imread(args.image)
-        if img is None:
-            sys.exit(f"Cannot read image: {args.image}")
-    else:
-        r = requests.get(PROXY_RAW_URL, timeout=15)
-        r.raise_for_status()
-        arr = np.frombuffer(r.content, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            sys.exit("Failed to decode image from proxy")
+    if not args.loop:
+        result = _run_once(args.image, args.debug, args.no_guard)
+        sys.exit(0 if result is not None else 1)
 
-    state = load_state()
+    interval = args.interval if args.interval is not None else READING_INTERVAL
+    log.info("Loop mode: interval=%.1fs  cam=%s  ha=%s",
+             interval, CAM_SNAPSHOT_URL, HA_URL or "(not configured)")
 
-    try:
-        reading, digital, angles_cor = process(img, debug=args.debug, state=state)
-    except ValueError as e:
-        log.error("%s", e)
-        sys.exit(1)
-
-    if not args.no_guard:
-        ok, reason = validate(reading, state)
-        if not ok:
-            log.warning("Rejected: %s", reason)
-            print(f"REJECTED {reading:.4f}")
-            sys.exit(2)
-        state = calibrate_from_rollover(digital, angles_cor, state)
-        state["last_reading"] = reading
-        save_state(state)
-
-    print(f"{reading:.4f}")
+    while True:
+        t0 = time.monotonic()
+        _run_once(args.image, args.debug, args.no_guard)
+        elapsed = time.monotonic() - t0
+        time.sleep(max(0.0, interval - elapsed))
 
 
 if __name__ == "__main__":
