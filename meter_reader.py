@@ -97,6 +97,7 @@ ALLOW_DECREASE = False
 STATE_FILE    = Path(os.environ.get("STATE_FILE",
                     str(Path(__file__).parent / ".meter_state.json")))
 INITIAL_VALUE = float(os.environ["INITIAL_VALUE"]) if "INITIAL_VALUE" in os.environ else None
+FLOW_MAX_AGE  = float(os.environ["FLOW_MAX_AGE"]) if "FLOW_MAX_AGE" in os.environ else None  # seconds
 
 log = logging.getLogger(__name__)
 
@@ -521,30 +522,47 @@ def annotate(img: np.ndarray, digital: list[int | None],
 
 
 # ── Home Assistant integration ─────────────────────────────────────────────────
-def push_to_ha(reading: float) -> None:
+def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
     if not HA_URL or not HA_TOKEN:
         return
-    try:
-        resp = requests.post(
-            f"{HA_URL}/api/states/sensor.water_meter",
-            json={
-                "state": f"{reading:.4f}",
-                "attributes": {
-                    "unit_of_measurement": "m³",
-                    "device_class": "water",
-                    "state_class": "total_increasing",
-                    "friendly_name": "Water Meter",
-                },
+    headers = {
+        "Authorization": f"Bearer {HA_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    entities = [
+        (
+            "sensor.water_meter",
+            f"{reading:.4f}",
+            {
+                "unit_of_measurement": "m³",
+                "device_class": "water",
+                "state_class": "total_increasing",
+                "friendly_name": "Water Meter",
             },
-            headers={
-                "Authorization": f"Bearer {HA_TOKEN}",
-                "Content-Type": "application/json",
+        ),
+    ]
+    if flow_lpm is not None:
+        entities.append((
+            "sensor.water_meter_flow",
+            f"{flow_lpm:.3f}",
+            {
+                "unit_of_measurement": "L/min",
+                "device_class": "volume_flow_rate",
+                "state_class": "measurement",
+                "friendly_name": "Water Meter Flow",
             },
-            timeout=10,
-        )
-        resp.raise_for_status()
-    except Exception as e:
-        log.warning("HA push failed: %s", e)
+        ))
+    for entity_id, state, attrs in entities:
+        try:
+            resp = requests.post(
+                f"{HA_URL}/api/states/{entity_id}",
+                json={"state": state, "attributes": attrs},
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning("HA push failed (%s): %s", entity_id, e)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -614,11 +632,25 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
         log.warning("Rejected: %s", reason)
         return None
 
+    now = time.time()
+    last_ts = state.get("last_reading_ts")
+    last_val = state.get("last_reading")
+    flow_lpm = None
+    if last_val is not None and last_ts is not None:
+        elapsed = now - last_ts
+        if elapsed <= 0:
+            log.warning("flow rate skipped: elapsed=%.3fs (clock went backwards?)", elapsed)
+        elif FLOW_MAX_AGE is not None and elapsed > FLOW_MAX_AGE:
+            log.info("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs", elapsed, FLOW_MAX_AGE)
+        else:
+            flow_lpm = (reading - last_val) * 1000 / elapsed * 60
+
     state = calibrate_from_rollover(digital, angles_cor, state)
     state["last_reading"] = reading
+    state["last_reading_ts"] = now
     save_state(state)
     print(f"{reading:.4f}", flush=True)
-    push_to_ha(reading)
+    push_to_ha(reading, flow_lpm)
     return reading
 
 
