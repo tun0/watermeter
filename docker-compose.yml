@@ -15,6 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.reader
+      target: production
     restart: unless-stopped
     environment:
       CAM_SNAPSHOT_URL: ${CAM_SNAPSHOT_URL:-http://192.168.x.x/}
@@ -23,3 +24,10 @@ services:
       HA_TOKEN: ${HA_TOKEN:-}
     volumes:
       - ./data:/app/data
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.reader
+      target: test
+    profiles: [test]

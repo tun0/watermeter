@@ -1,0 +1,6 @@
+pytest
+ruff
+opencv-python-headless
+numpy
+pytesseract
+requests
