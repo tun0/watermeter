@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+echo "Running tests in Docker..."
+docker compose --profile test run --rm test
+
+# Chain global pre-push hook (e.g. main-branch protection) if one exists
+GLOBAL_HOOKS=$(git config --global core.hooksPath 2>/dev/null)
+GLOBAL_HOOK="${GLOBAL_HOOKS}/pre-push"
+if [ -x "$GLOBAL_HOOK" ]; then
+    exec "$GLOBAL_HOOK" "$@"
+fi
