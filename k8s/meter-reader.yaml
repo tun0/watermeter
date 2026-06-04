@@ -59,6 +59,11 @@ spec:
             #     configMapKeyRef:
             #       name: watermeter-config
             #       key: INITIAL_VALUE
+            # - name: FLOW_MAX_AGE
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: watermeter-config
+            #       key: FLOW_MAX_AGE
           volumeMounts:
             - name: data
               mountPath: /app/data

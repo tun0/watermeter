@@ -9,3 +9,4 @@ data:
   COLLECTOR_INTERVAL: "10"
   READING_INTERVAL:   "10"
   # INITIAL_VALUE: "297.1234"   # seed last_reading when no state file exists yet
+  # FLOW_MAX_AGE: "300"         # seconds; omit flow rate if gap since last reading exceeds this
