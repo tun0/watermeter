@@ -144,12 +144,15 @@ def _ocr_single_digit(crop: np.ndarray) -> int | None:
     return None
 
 
-def read_digital_digits(img: np.ndarray) -> list[int | None]:
+def read_digital_digits(img: np.ndarray,
+                        last_int: int | None = None) -> list[int | None]:
     """Return list of 5 ints (or None per failed digit) from the digital counter.
 
     Primary path: reads the full digit strip as one unit with PSM 8 — more
     reliable than per-digit PSM 10 for this meter's font.  Falls back to
-    per-digit OCR if the strip result doesn't yield exactly 5 digits.
+    per-digit OCR if the strip result doesn't yield exactly 5 digits, or if
+    the zfilled result is implausibly far from last_int (e.g. Tesseract dropped
+    a leading zero AND misread another — "00297" → "9297" → zfill "09297").
     """
     sx, sy, sw, sh = _DIGITAL_STRIP
     strip = img[sy:sy + sh, sx:sx + sw]
@@ -166,7 +169,12 @@ def read_digital_digits(img: np.ndarray) -> list[int | None]:
         # Tesseract often drops them from the strip; zfill restores them.
         # Internal spaces are removed above so "0 2 5" → "025" before the check.
         if result.isdigit() and n - 2 <= len(result) <= n:
-            return [int(c) for c in result.zfill(n)]
+            digits = [int(c) for c in result.zfill(n)]
+            if last_int is None or abs(int("".join(str(d) for d in digits)) - last_int) <= 5:
+                return digits
+            log.warning("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
+                        result, result.zfill(n), last_int)
+            break
 
     log.warning("strip OCR gave no clean 5-digit result — falling back to per-digit")
     return [_ocr_single_digit(img[y:y + h, x:x + w])
@@ -543,8 +551,9 @@ def process(img: np.ndarray, debug: bool = False,
     Returns (reading, digital, angles_cor).
     Pass `state` to enable rollover disambiguation using calibrated dial zeros.
     """
-    rotated    = rotate_image(img, ROTATE_DEG)
-    digital    = read_digital_digits(rotated)
+    rotated  = rotate_image(img, ROTATE_DEG)
+    last_int = int(state["last_reading"]) if state and "last_reading" in state else None
+    digital  = read_digital_digits(rotated, last_int=last_int)
     angles_raw = read_analog_dials(rotated)
     angles_cor = correct_gear_lash(angles_raw)
 
