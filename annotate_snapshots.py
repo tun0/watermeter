@@ -24,10 +24,17 @@ import numpy as np
 # Import pipeline from meter_reader
 sys.path.insert(0, str(Path(__file__).parent))
 from meter_reader import (
-    ANALOG_DIALS, DIGITAL_DIGITS, MAX_STEP,
-    rotate_image, read_digital_digits, read_analog_dials,
-    correct_gear_lash, assemble_reading, angle_to_digit,
-    ROTATE_DEG, resolve_rollover,
+    ANALOG_DIALS,
+    DIGITAL_DIGITS,
+    MAX_STEP,
+    ROTATE_DEG,
+    angle_to_digit,
+    assemble_reading,
+    correct_gear_lash,
+    read_analog_dials,
+    read_digital_digits,
+    resolve_rollover,
+    rotate_image,
 )
 
 _LAST_DIAL_IDX = len(ANALOG_DIALS) - 1

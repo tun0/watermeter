@@ -3,8 +3,9 @@
 
 import os
 import time
-import requests
 from datetime import datetime
+
+import requests
 
 CAM_SNAPSHOT_URL = os.getenv("CAM_SNAPSHOT_URL", "http://192.168.x.x/")
 CAM_STREAM_URL   = os.getenv("CAM_STREAM_URL",   "http://192.168.x.x:8080/")

@@ -116,7 +116,7 @@ class DigitMatcher:
                 continue
             reading = "".join(str(d) for d in digits)
             # Require plausible integer prefix
-            if not (reading[:3] in ("002", "003")):
+            if reading[:3] not in ("002", "003"):
                 continue
 
             for pos, (x, y, w, h) in enumerate(mr.DIGITAL_DIGITS):

@@ -233,14 +233,14 @@ def interactive_calibration(img: np.ndarray, deg: float):
     print(f"\n# ── Paste into meter_reader.py {'─' * 38}")
     print(f"ROTATE_DEG = {deg}")
     print(f"_DIGITAL_STRIP = ({sx}, {sy}, {sw}, {sh})")
-    print(f"DIGITAL_DIGITS = [")
+    print("DIGITAL_DIGITS = [")
     for x, y, dw2, dh2 in digits:
         print(f"    ({x}, {y}, {dw2}, {dh2}),")
-    print(f"]  # auto-split; adjust x/w per digit if OCR struggles")
-    print(f"\n_ANALOG_DIAL_OFFSETS = [  # (dx, dy, r) from strip centre")
+    print("]  # auto-split; adjust x/w per digit if OCR struggles")
+    print("\n_ANALOG_DIAL_OFFSETS = [  # (dx, dy, r) from strip centre")
     for i, (dx, dy, r) in enumerate(offsets):
         print(f"    ({dx:+d}, {dy:+d}, {r}, False, False),  # {DIAL_LABELS[i]}")
-    print(f"]")
+    print("]")
     print(f"# {'─' * 55}")
 
 

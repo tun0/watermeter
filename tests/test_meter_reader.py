@@ -2,7 +2,6 @@ import pytest
 
 import meter_reader as mr
 
-
 # ── angle_to_digit ────────────────────────────────────────────────────────────
 
 def test_angle_to_digit_boundaries():
