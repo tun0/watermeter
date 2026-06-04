@@ -94,8 +94,9 @@ LASH_NEAR_ZERO = 0.90
 MAX_STEP       = 2.0    # reject reading jumps larger than this (m³)
 ALLOW_DECREASE = False
 
-STATE_FILE = Path(os.environ.get("STATE_FILE",
-                  str(Path(__file__).parent / ".meter_state.json")))
+STATE_FILE    = Path(os.environ.get("STATE_FILE",
+                    str(Path(__file__).parent / ".meter_state.json")))
+INITIAL_VALUE = float(os.environ["INITIAL_VALUE"]) if "INITIAL_VALUE" in os.environ else None
 
 log = logging.getLogger(__name__)
 
@@ -473,6 +474,8 @@ def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
     except Exception:
+        if INITIAL_VALUE is not None:
+            return {"last_reading": INITIAL_VALUE}
         return {}
 
 

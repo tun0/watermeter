@@ -54,6 +54,11 @@ spec:
                   key: HA_TOKEN
             - name: STATE_FILE
               value: /app/data/.meter_state.json
+            # - name: INITIAL_VALUE
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: watermeter-config
+            #       key: INITIAL_VALUE
           volumeMounts:
             - name: data
               mountPath: /app/data
