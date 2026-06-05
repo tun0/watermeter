@@ -657,6 +657,8 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
     state["last_reading"] = reading
     state["last_reading_ts"] = now
     save_state(state)
+    flow_str = f"{flow_lpm:.3f} L/min" if flow_lpm is not None else "n/a"
+    log.info("accepted reading=%.4f  flow=%s", reading, flow_str)
     print(f"{reading:.4f}", flush=True)
     push_to_ha(reading, flow_lpm)
     return reading
