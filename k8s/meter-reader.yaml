@@ -37,33 +37,38 @@ spec:
                 configMapKeyRef:
                   name: watermeter-config
                   key: CAM_SNAPSHOT_URL
-            - name: READING_INTERVAL
-              valueFrom:
-                configMapKeyRef:
-                  name: watermeter-config
-                  key: READING_INTERVAL
-            - name: HA_URL
-              valueFrom:
-                secretKeyRef:
-                  name: watermeter-secrets
-                  key: HA_URL
-            - name: HA_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: watermeter-secrets
-                  key: HA_TOKEN
-            - name: STATE_FILE
-              value: /app/data/.meter_state.json
-            # - name: INITIAL_VALUE
-            #   valueFrom:
-            #     configMapKeyRef:
-            #       name: watermeter-config
-            #       key: INITIAL_VALUE
             # - name: FLOW_MAX_AGE
             #   valueFrom:
             #     configMapKeyRef:
             #       name: watermeter-config
             #       key: FLOW_MAX_AGE
+            - name: HA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: watermeter-secrets
+                  key: HA_TOKEN
+            - name: HA_URL
+              valueFrom:
+                secretKeyRef:
+                  name: watermeter-secrets
+                  key: HA_URL
+            # - name: INITIAL_VALUE
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: watermeter-config
+            #       key: INITIAL_VALUE
+            - name: MAX_STEP
+              valueFrom:
+                configMapKeyRef:
+                  name: watermeter-config
+                  key: MAX_STEP
+            - name: READING_INTERVAL
+              valueFrom:
+                configMapKeyRef:
+                  name: watermeter-config
+                  key: READING_INTERVAL
+            - name: STATE_FILE
+              value: /app/data/.meter_state.json
           volumeMounts:
             - name: data
               mountPath: /app/data

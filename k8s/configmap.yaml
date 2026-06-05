@@ -4,9 +4,10 @@ metadata:
   name: watermeter-config
   namespace: watermeter
 data:
-  CAM_SNAPSHOT_URL: "http://192.168.x.x/"
-  CAM_STREAM_URL:   "http://192.168.x.x:8080/"
+  CAM_SNAPSHOT_URL:   "http://192.168.x.x/"
+  CAM_STREAM_URL:     "http://192.168.x.x:8080/"
   COLLECTOR_INTERVAL: "10"
-  READING_INTERVAL:   "10"
-  # INITIAL_VALUE: "297.1234"   # seed last_reading when no state file exists yet
   # FLOW_MAX_AGE: "300"         # seconds; omit flow rate if gap since last reading exceeds this
+  # INITIAL_VALUE: "297.1234"   # seed last_reading when no state file exists yet
+  MAX_STEP:           "0.05"   # m³ per sample; rejects jumps larger than this
+  READING_INTERVAL:   "10"

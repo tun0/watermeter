@@ -91,7 +91,7 @@ LASH_LOW       = 0.20
 LASH_EXT_DEG   = 120.0  # ~3.3 digits past 0° crossing
 LASH_NEAR_ZERO = 0.90
 
-MAX_STEP       = 2.0    # reject reading jumps larger than this (m³)
+MAX_STEP       = float(os.environ.get("MAX_STEP", 0.05))  # m³ per sample
 ALLOW_DECREASE = False
 
 STATE_FILE    = Path(os.environ.get("STATE_FILE",
