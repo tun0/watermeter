@@ -53,12 +53,13 @@ Key environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `CAM_SNAPSHOT_URL` | — | Camera snapshot endpoint |
-| `HA_URL` | — | Home Assistant base URL |
-| `HA_TOKEN` | — | HA long-lived access token |
-| `STATE_FILE` | `.meter_state.json` | Path to persisted state |
-| `INITIAL_VALUE` | — | Seed `last_reading` on first run (no state file yet) |
-| `READING_INTERVAL` | `10` | Loop interval in seconds |
 | `FLOW_MAX_AGE` | — | Skip flow rate if gap since last reading exceeds this (seconds) |
+| `HA_TOKEN` | — | HA long-lived access token |
+| `HA_URL` | — | Home Assistant base URL |
+| `INITIAL_VALUE` | — | Seed `last_reading` on first run (no state file yet) |
+| `MAX_STEP` | `0.05` | Reject jumps larger than this between samples (m³) |
+| `READING_INTERVAL` | `10` | Loop interval in seconds |
+| `STATE_FILE` | `.meter_state.json` | Path to persisted state |
 
 ## Tests
 
