@@ -548,6 +548,16 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
                 "friendly_name": "Water Meter",
             },
         ),
+        (
+            "sensor.water_meter_liters",
+            f"{reading * 1000:.1f}",
+            {
+                "unit_of_measurement": "L",
+                "device_class": "water",
+                "state_class": "total_increasing",
+                "friendly_name": "Water Meter (L)",
+            },
+        ),
     ]
     if flow_lpm is not None:
         entities.append((
