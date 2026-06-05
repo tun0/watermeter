@@ -22,7 +22,7 @@ def test_validate_first_reading():
 
 
 def test_validate_ok():
-    ok, _ = mr.validate(100.5, {"last_reading": 100.0})
+    ok, _ = mr.validate(100.0 + mr.MAX_STEP / 2, {"last_reading": 100.0})
     assert ok
 
 
@@ -38,7 +38,7 @@ def test_validate_jump_too_large():
 
 
 def test_validate_decrease():
-    ok, reason = mr.validate(99.9, {"last_reading": 100.0})
+    ok, reason = mr.validate(100.0 - mr.MAX_STEP / 2, {"last_reading": 100.0})
     assert not ok
     assert "decrease" in reason
 
