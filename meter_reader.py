@@ -172,15 +172,29 @@ def read_digital_digits(img: np.ndarray,
         # Internal spaces are removed above so "0 2 5" → "025" before the check.
         if result.isdigit() and n - 2 <= len(result) <= n:
             digits = [int(c) for c in result.zfill(n)]
-            if last_int is None or abs(int("".join(str(d) for d in digits)) - last_int) <= 5:
+            # With MAX_STEP=0.05 m³ the integer can only advance by 0 or 1 per
+            # sample, so a threshold of 2 is generous while blocking misreads
+            # like 8→3 (diff=5) slipping through as a plausible strip result.
+            if last_int is None or abs(int("".join(str(d) for d in digits)) - last_int) <= 2:
                 return digits
             log.warning("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
                         result, result.zfill(n), last_int)
             break
 
     log.warning("strip OCR gave no clean 5-digit result — falling back to per-digit")
-    return [_ocr_single_digit(img[y:y + h, x:x + w])
-            for x, y, w, h in DIGITAL_DIGITS]
+    digits = [_ocr_single_digit(img[y:y + h, x:x + w]) for x, y, w, h in DIGITAL_DIGITS]
+    if last_int is not None:
+        last_digs = [int(c) for c in f"{last_int:05d}"]
+        for i, d in enumerate(digits):
+            rollover = (last_digs[i] + 1) % 10
+            if d is None:
+                digits[i] = last_digs[i]
+                log.info("digit[%d] OCR failed — using last known %d", i, last_digs[i])
+            elif d != last_digs[i] and d != rollover:
+                log.info("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last known",
+                         i, d, last_digs[i], rollover)
+                digits[i] = last_digs[i]
+    return digits
 
 
 # ── Analog dial detection ──────────────────────────────────────────────────────
