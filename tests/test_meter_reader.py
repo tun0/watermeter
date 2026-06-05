@@ -173,6 +173,28 @@ def test_resolve_rollover_no_change_mid_digit():
     assert result == digital
 
 
+def test_resolve_rollover_corrects_garbled_digit():
+    # OCR reads 9 for units position during 7→8 transition (not in {7,8}) — dial
+    # confirms the rollover has passed → must still correct to 8.
+    state = _rollover_state(297.5, [10.0, 20.0, None, None])
+    result = mr.resolve_rollover([0, 0, 2, 9, 9], [15.0, 0.0, 0.0, 0.0], state)
+    assert result[4] == 8
+
+
+def test_resolve_rollover_corrects_none_digit():
+    # OCR returns None for units during transition — dial is past zero → fill with expected_new.
+    state = _rollover_state(297.5, [10.0, 20.0, None, None])
+    result = mr.resolve_rollover([0, 0, 2, 9, None], [15.0, 0.0, 0.0, 0.0], state)
+    assert result[4] == 8
+
+
+def test_resolve_rollover_works_when_other_digit_is_none():
+    # A None in a non-calibrated position must not block correction of calibrated ones.
+    state = _rollover_state(297.5, [10.0, 20.0, None, None])
+    result = mr.resolve_rollover([None, 0, 2, 9, 7], [15.0, 0.0, 0.0, 0.0], state)
+    assert result[4] == 8  # units corrected despite None in ten-thousands
+
+
 # ── load_state / save_state ───────────────────────────────────────────────────
 
 def test_save_and_load_roundtrip(tmp_path, monkeypatch):

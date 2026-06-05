@@ -422,14 +422,16 @@ def resolve_rollover(digital: list[int | None],
                      angles: list[float | None],
                      state: dict) -> list[int | None]:
     """
-    When OCR catches a digit mid-transition (showing old or new value), use the
-    corresponding dial's calibrated fraction to decide which is correct:
-      fraction < _ROLLOVER_BAND  → dial just crossed zero → digit already incremented
-      fraction > 1-_ROLLOVER_BAND → dial about to cross zero → digit not yet incremented
-    Only acts when the OCR digit is plausibly one of the two transition values.
+    Use the calibrated dial fraction to correct digits that OCR got wrong during
+    a mechanical drum transition.  Operates on any OCR value (including None and
+    garbled reads such as 9 during a 7→8 transition) whenever the dial fraction
+    is inside the rollover band:
+      fraction < _ROLLOVER_BAND  → dial just crossed zero → force expected_new
+      fraction > 1-_ROLLOVER_BAND → dial about to cross zero → force expected_old
+    Outside the rollover band the digit is left as-is.
     """
     last = state.get("last_reading")
-    if last is None or any(d is None for d in digital):
+    if last is None:
         return digital
 
     offsets   = state.get("dial_zero_offsets", [None] * 4)
@@ -439,16 +441,6 @@ def resolve_rollover(digital: list[int | None],
     for pos, dial_idx in _POS_DRIVEN_BY_DIAL.items():
         if dial_idx not in _CALIBRATE_DIALS:
             continue
-        d      = result[pos]
-        last_d = last_digs[pos]
-        if d is None:
-            continue
-
-        expected_old = last_d
-        expected_new = (last_d + 1) % 10
-
-        if d not in (expected_old, expected_new):
-            continue  # clearly wrong digit, leave for the guard
 
         frac = _dial_fraction(
             angles[dial_idx] if dial_idx < len(angles) else None,
@@ -456,15 +448,17 @@ def resolve_rollover(digital: list[int | None],
         if frac is None:
             continue
 
-        if frac < _ROLLOVER_BAND and d == expected_old:
-            # Dial has crossed zero but OCR still sees old digit → correct up
+        d            = result[pos]
+        expected_old = last_digs[pos]
+        expected_new = (expected_old + 1) % 10
+
+        if frac < _ROLLOVER_BAND and d != expected_new:
             result[pos] = expected_new
-            log.info("rollover assist: pos%d OCR=%d → %d  (A%d frac=%.3f, past zero)",
+            log.info("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, past zero)",
                      pos, d, expected_new, dial_idx, frac)
-        elif frac > 1 - _ROLLOVER_BAND and d == expected_new:
-            # Dial hasn't crossed zero yet but OCR shows new digit → correct down
+        elif frac > 1 - _ROLLOVER_BAND and d != expected_old:
             result[pos] = expected_old
-            log.info("rollover assist: pos%d OCR=%d → %d  (A%d frac=%.3f, before zero)",
+            log.info("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, before zero)",
                      pos, d, expected_old, dial_idx, frac)
 
     return result
