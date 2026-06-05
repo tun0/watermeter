@@ -177,11 +177,11 @@ def read_digital_digits(img: np.ndarray,
             # like 8→3 (diff=5) slipping through as a plausible strip result.
             if last_int is None or abs(int("".join(str(d) for d in digits)) - last_int) <= 2:
                 return digits
-            log.warning("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
-                        result, result.zfill(n), last_int)
+            log.info("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
+                     result, result.zfill(n), last_int)
             break
 
-    log.warning("strip OCR gave no clean 5-digit result — falling back to per-digit")
+    log.info("strip OCR gave no clean 5-digit result — falling back to per-digit")
     digits = [_ocr_single_digit(img[y:y + h, x:x + w]) for x, y, w, h in DIGITAL_DIGITS]
     if last_int is not None:
         last_digs = [int(c) for c in f"{last_int:05d}"]
@@ -189,10 +189,10 @@ def read_digital_digits(img: np.ndarray,
             rollover = (last_digs[i] + 1) % 10
             if d is None:
                 digits[i] = last_digs[i]
-                log.info("digit[%d] OCR failed — using last known %d", i, last_digs[i])
+                log.debug("digit[%d] OCR failed — using last known %d", i, last_digs[i])
             elif d != last_digs[i] and d != rollover:
-                log.info("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last known",
-                         i, d, last_digs[i], rollover)
+                log.debug("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last known",
+                          i, d, last_digs[i], rollover)
                 digits[i] = last_digs[i]
     return digits
 
@@ -289,10 +289,10 @@ def correct_gear_lash(angles: list[float | None]) -> list[float | None]:
             snapped = (int(result[i] / 36.0) + 1) % 10
             old     = result[i]
             result[i] = float(snapped * 36)
-            log.info("gear-lash: dial %d %.1f°(frac %.2f) → digit %d  "
-                     "[dial %d at %.1f°, %.0f° past 0]",
-                     i + 1, old, frac_cur, snapped, i + 2,
-                     angles[i + 1], angle_next_mod)
+            log.debug("gear-lash: dial %d %.1f°(frac %.2f) → digit %d  "
+                      "[dial %d at %.1f°, %.0f° past 0]",
+                      i + 1, old, frac_cur, snapped, i + 2,
+                      angles[i + 1], angle_next_mod)
 
     # Pass 2 — near-zero snap: treat digit 9 at frac >= LASH_NEAR_ZERO as digit 0
     for i in range(len(result) - 2, -1, -1):
@@ -310,13 +310,13 @@ def correct_gear_lash(angles: list[float | None]) -> list[float | None]:
             snapped    = (int(result[i] / 36.0) + 1) % 10
             old        = result[i]
             result[i]  = float(snapped * 36)
-            log.info("gear-lash near-zero: dial %d %.1f°(frac %.2f) → digit %d  "
-                     "[dial %d %.1f°→0°]",
-                     i + 1, old, frac_cur, snapped, i + 2, old_next)
+            log.debug("gear-lash near-zero: dial %d %.1f°(frac %.2f) → digit %d  "
+                      "[dial %d %.1f°→0°]",
+                      i + 1, old, frac_cur, snapped, i + 2, old_next)
         else:
-            log.info("gear-lash near-zero: dial %d snapped to 0°  "
-                     "[dial %d frac %.2f not in lash zone]",
-                     i + 2, old_next, i + 1, frac_cur)
+            log.debug("gear-lash near-zero: dial %d snapped to 0°  "
+                      "[dial %d frac %.2f not in lash zone]",
+                      i + 2, old_next, i + 1, frac_cur)
 
     return result
 
@@ -468,12 +468,12 @@ def resolve_rollover(digital: list[int | None],
 
         if frac < _ROLLOVER_BAND and d != expected_new:
             result[pos] = expected_new
-            log.info("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, past zero)",
-                     pos, d, expected_new, dial_idx, frac)
+            log.debug("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, past zero)",
+                      pos, d, expected_new, dial_idx, frac)
         elif frac > 1 - _ROLLOVER_BAND and d != expected_old:
             result[pos] = expected_old
-            log.info("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, before zero)",
-                     pos, d, expected_old, dial_idx, frac)
+            log.debug("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, before zero)",
+                      pos, d, expected_old, dial_idx, frac)
 
     return result
 
@@ -591,16 +591,16 @@ def process(img: np.ndarray, debug: bool = False,
 
     reading = assemble_reading(digital, angles_cor)
 
-    log.info("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
-             digital,
-             [f"{a:.1f}" if a is not None else "None" for a in angles_raw],
-             [angle_to_digit(a) if a is not None else "?" for a in angles_cor],
-             reading)
+    log.debug("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
+              digital,
+              [f"{a:.1f}" if a is not None else "None" for a in angles_raw],
+              [angle_to_digit(a) if a is not None else "?" for a in angles_cor],
+              reading)
 
     if debug:
         ann = annotate(rotated, digital, angles_raw, angles_cor)
         cv2.imwrite("debug_reading.jpg", ann)
-        log.info("Annotated image saved to debug_reading.jpg")
+        log.debug("Annotated image saved to debug_reading.jpg")
 
     return reading, digital, angles_cor
 
@@ -649,7 +649,7 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
         if elapsed <= 0:
             log.warning("flow rate skipped: elapsed=%.3fs (clock went backwards?)", elapsed)
         elif FLOW_MAX_AGE is not None and elapsed > FLOW_MAX_AGE:
-            log.info("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs", elapsed, FLOW_MAX_AGE)
+            log.debug("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs", elapsed, FLOW_MAX_AGE)
         else:
             flow_lpm = (reading - last_val) * 1000 / elapsed * 60
 
