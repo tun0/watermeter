@@ -612,7 +612,7 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
     try:
         img = _fetch_image(image_path)
         reading, digital, angles_cor = process(img, debug=debug, state=state)
-    except (ValueError, RuntimeError) as e:
+    except (ValueError, RuntimeError, requests.exceptions.RequestException) as e:
         log.error("%s", e)
         return None
 
