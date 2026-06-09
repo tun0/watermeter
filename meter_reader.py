@@ -498,7 +498,7 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
         return True, "first reading"
     delta = new_val - last
     if abs(delta) > MAX_STEP:
-        return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP}"
+        return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP} ({last:.4f} → {new_val:.4f})"
     if not ALLOW_DECREASE and delta < 0:
         return False, f"decrease not allowed ({last:.4f} → {new_val:.4f})"
     return True, "ok"
