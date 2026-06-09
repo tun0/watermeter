@@ -76,22 +76,22 @@ def test_assemble_reading_raises_on_none_angle():
 
 
 def test_assemble_reading_all_zeros():
-    # All dials at 0° → analog digits all 0 → fractional = 0 + DIAL_PHASE_CORRECTION
+    # All dials at 0° → analog digits all 0 → raw frac 0.0, corrected = (0 - 0.1111) % 1 = 0.8889
     reading = mr.assemble_reading([0, 0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0])
-    assert reading == pytest.approx(mr.DIAL_PHASE_CORRECTION, abs=1e-4)
+    assert reading == pytest.approx((0.0 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
 
 
 def test_assemble_reading_integer_from_digital():
     reading = mr.assemble_reading([0, 0, 2, 9, 7], [0.0, 0.0, 0.0, 0.0])
-    assert reading == pytest.approx(297 + mr.DIAL_PHASE_CORRECTION, abs=1e-4)
+    assert reading == pytest.approx(297 + (0.0 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
 
 
 def test_assemble_reading_last_dial_rounds_up():
     # Last dial just past the 0.5 mark of digit 0 → rounds up to 1
     # 0.5 frac of digit 0 = 18°; just above: 18.5°
     reading = mr.assemble_reading([0, 0, 0, 0, 0], [0.0, 0.0, 0.0, 18.5])
-    # last analog digit becomes 1 → fractional = 0.0001 + DIAL_PHASE_CORRECTION
-    assert reading == pytest.approx(0.0001 + mr.DIAL_PHASE_CORRECTION, abs=1e-4)
+    # last analog digit becomes 1 → fractional = (0.0001 + DIAL_PHASE_CORRECTION) % 1
+    assert reading == pytest.approx((0.0001 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
 
 
 # ── correct_gear_lash ─────────────────────────────────────────────────────────
