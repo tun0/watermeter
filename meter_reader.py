@@ -72,11 +72,11 @@ ANALOG_DIALS = _make_analog_dials()
 
 # Mechanical phase correction for analog dials.
 # The gear engagement that drives the next dial happens when the driving dial
-# reaches face "9", not face "0".  This means face "0" is actually the first
-# graduation PAST the mechanical zero, so all raw digit readings are one digit
-# low.  Applied as a decimal addition (0.1111) so carry propagates correctly:
-# e.g. raw 0.7491 + 0.1111 = 0.8602, not the broken per-digit 0.8502.
-DIAL_PHASE_CORRECTION = 0.1111
+# reaches face "1", not face "0".  Face "1" is the mechanical zero — when all
+# dials show "1" the integer counter has just incremented.  Raw fractional at
+# that point is 0.1111, so we subtract 0.1111 to map it to 0.0000.
+# e.g. raw 0.7491 - 0.1111 = 0.6380
+DIAL_PHASE_CORRECTION = -0.1111
 
 # Gear-lash correction thresholds.
 # LASH_HIGH: more-significant dial frac above this → approaching next digit, snap up.
