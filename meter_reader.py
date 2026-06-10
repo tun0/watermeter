@@ -71,12 +71,21 @@ def _make_analog_dials():
 ANALOG_DIALS = _make_analog_dials()
 
 # Mechanical phase correction for analog dials.
-# The gear engagement that drives the next dial happens when the driving dial
-# reaches face "1", not face "0".  Face "1" is the mechanical zero — when all
-# dials show "1" the integer counter has just incremented.  Raw fractional at
-# that point is 0.1111, so we subtract 0.1111 to map it to 0.0000.
-# e.g. raw 0.7491 - 0.1111 = 0.6380
-DIAL_PHASE_CORRECTION = -0.1111
+# Empirically derived from the 299→300 rollover: raw_frac at the moment OCR
+# first cleanly reads the new integer was 0.3705.  Setting the correction to
+# -0.3705 maps that exact moment to corrected_frac=0.0000 (integer boundary),
+# giving a seamless ≤0.0001 m³ delta at rollover.  For single-digit rollovers
+# (where OCR detects later, at higher raw_frac) the rollover bridge fires at
+# this same wrap point and achieves the same seamless transition.
+# e.g. raw 0.7491 - 0.3705 = 0.3786
+DIAL_PHASE_CORRECTION = -0.3705
+
+# Rollover bridge threshold.  When the corrected fractional wraps from ~1 to
+# ~0 (analog crossed the integer boundary) but the digital OCR still shows
+# the old integer, the bridge infers integer+1.  Fires when corrected_frac is
+# within this band of 0, and the previous reading's fractional was within this
+# band of 1.
+ROLLOVER_BRIDGE_THRESHOLD = 0.15
 
 # Gear-lash correction thresholds.
 # LASH_HIGH: more-significant dial frac above this → approaching next digit, snap up.
@@ -600,6 +609,21 @@ def process(img: np.ndarray, debug: bool = False,
         digital = resolve_rollover(digital, angles_cor, state)
 
     reading = assemble_reading(digital, angles_cor)
+
+    # Rollover bridge: if the corrected fractional just wrapped to near-zero
+    # while the digital OCR still shows the old integer, trust the analog and
+    # infer integer+1.  Fires for both multi-digit rollovers (where OCR catches
+    # up at the wrap point) and single-digit rollovers (where OCR detects late).
+    if state and "last_reading" in state:
+        last = state["last_reading"]
+        frac = reading % 1.0
+        if (int(reading) == int(last) and
+                frac < ROLLOVER_BRIDGE_THRESHOLD and
+                last % 1.0 > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
+            old_int = int(reading)
+            reading = round(old_int + 1 + frac, 4)
+            log.debug("rollover bridge: analog wrapped, integer %d→%d  frac=%.4f",
+                      old_int, old_int + 1, frac)
 
     log.debug("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
               digital,
