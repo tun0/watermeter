@@ -102,6 +102,10 @@ LASH_NEAR_ZERO = 0.90
 
 MAX_STEP       = float(os.environ.get("MAX_STEP", 0.05))  # m³ per sample
 ALLOW_DECREASE = False
+# Analog dial noise floor: dials settling after flow stops can read up to this
+# much lower than the flow-peak.  Decreases within this band are accepted
+# (flow reported as zero); larger decreases are still rejected as likely errors.
+JITTER_TOLERANCE = float(os.environ.get("JITTER_TOLERANCE", 0.010))  # m³
 
 STATE_FILE    = Path(os.environ.get("STATE_FILE",
                     str(Path(__file__).parent / ".meter_state.json")))
@@ -508,7 +512,7 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
     delta = new_val - last
     if abs(delta) > MAX_STEP:
         return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP} ({last:.4f} → {new_val:.4f})"
-    if not ALLOW_DECREASE and delta < 0:
+    if not ALLOW_DECREASE and delta < -JITTER_TOLERANCE:
         return False, f"decrease not allowed ({last:.4f} → {new_val:.4f})"
     return True, "ok"
 
@@ -685,7 +689,7 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
         elif FLOW_MAX_AGE is not None and elapsed > FLOW_MAX_AGE:
             log.debug("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs", elapsed, FLOW_MAX_AGE)
         else:
-            flow_lpm = (reading - last_val) * 1000 / elapsed * 60
+            flow_lpm = max(0.0, (reading - last_val) * 1000 / elapsed * 60)
 
     state = calibrate_from_rollover(digital, angles_cor, state)
     state["last_reading"] = reading
