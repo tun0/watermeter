@@ -1,17 +1,30 @@
 substitutions:
-  device_description: camera systeem op de esp32-s3 (2)
-  friendly_name: esp32 camera 2
-  name: esp32_camera_2
+  device_description: Watermeter camera
+  friendly_name: watermeter camera
+  name: watermeter-camera
 
 esphome:
-  name: esp32-camera-2
+  name: '${name}'
+  friendly_name: '${friendly_name}'
   comment: '${device_description}'
+  platformio_options:
+    board_build.sdkconfig_opts: "CONFIG_LWIP_MAX_SOCKETS=32"
+  on_boot:
+    priority: 250
+    then:
+      - light.turn_on:
+          id: meterRingLight
+          brightness: 20%
+          red: 100%
+          green: 100%
+          blue: 100%
+
 
 esp32:
   board: esp32-s3-devkitc1-n16r8
   variant: ESP32S3
   framework:
-    type: arduino
+    type: esp-idf
 
 psram:
   mode: octal
@@ -20,36 +33,14 @@ psram:
 logger:
   level: DEBUG
   hardware_uart: UART0
+  logs:
+    esp32_camera: WARN
+    mdns: WARN
+    wifi: INFO
 
 api:
   encryption:
     key: !secret home_assistant_key
-  services:
-    - service: camera_set_param
-      variables:
-        name: string
-        value: int
-      then:
-        - lambda: |-
-            bool state_return = false;
-            if (("contrast" == name) && (value >= -2) && (value <= 2)) { id(espcam).set_contrast(value); state_return = true; }
-            if (("brightness" == name) && (value >= -2) && (value <= 2)) { id(espcam).set_brightness(value); state_return = true; }
-            if (("saturation" == name) && (value >= -2) && (value <= 2)) { id(espcam).set_saturation(value); state_return = true; }
-            if (("special_effect" == name) && (value >= 0U) && (value <= 6U)) { id(espcam).set_special_effect((esphome::esp32_camera::ESP32SpecialEffect)value); state_return = true; }
-            if (("aec_mode" == name) && (value >= 0U) && (value <= 1U)) { id(espcam).set_aec_mode((esphome::esp32_camera::ESP32GainControlMode)value); state_return = true; }
-            if (("aec2" == name) && (value >= 0U) && (value <= 1U)) { id(espcam).set_aec2(value); state_return = true; }
-            if (("ae_level" == name) && (value >= -2) && (value <= 2)) { id(espcam).set_ae_level(value); state_return = true; }
-            if (("aec_value" == name) && (value >= 0U) && (value <= 1200U)) { id(espcam).set_aec_value(value); state_return = true; }
-            if (("agc_mode" == name) && (value >= 0U) && (value <= 1U)) { id(espcam).set_agc_mode((esphome::esp32_camera::ESP32GainControlMode)value); state_return = true; }
-            if (("agc_value" == name) && (value >= 0U) && (value <= 30U)) { id(espcam).set_agc_value(value); state_return = true; }
-            if (("agc_gain_ceiling" == name) && (value >= 0U) && (value <= 6U)) { id(espcam).set_agc_gain_ceiling((esphome::esp32_camera::ESP32AgcGainCeiling)value); state_return = true; }
-            if (("wb_mode" == name) && (value >= 0U) && (value <= 4U)) { id(espcam).set_wb_mode((esphome::esp32_camera::ESP32WhiteBalanceMode)value); state_return = true; }
-            if (("test_pattern" == name) && (value >= 0U) && (value <= 1U)) { id(espcam).set_test_pattern(value); state_return = true; }
-            if (true == state_return) {
-              id(espcam).update_camera_parameters();
-            } else {
-              ESP_LOGW("esp32_camera_set_param", "Error in name or data range");
-            }
 
 ota:
   - platform: esphome
@@ -61,12 +52,12 @@ wifi:
   password: !secret wifi_password
 
 web_server:
-  port: 81
+  port: 80
 
 esp32_camera_web_server:
-  - port: 80
-    mode: snapshot
   - port: 8080
+    mode: snapshot
+  - port: 8081
     mode: stream
 
 i2c:
@@ -87,8 +78,8 @@ esp32_camera:
   pixel_clock_pin: GPIO13
   resolution: 1600x1200
   jpeg_quality: 12
-  max_framerate: 5.0fps
-  idle_framerate: 1.0fps
+  max_framerate: 1.0fps
+  idle_framerate: 0.2fps
   vertical_flip: true
   horizontal_mirror: false
   brightness: 0
@@ -104,24 +95,12 @@ esp32_camera:
   wb_mode: auto
 
 light:
-  - platform: neopixelbus
-    type: GRB
-    variant: WS2812
-    pin: GPIO48
-    num_leds: 1
-    id: espCamLight
-    name: esp-cam-2 light
-
-switch:
-  - platform: restart
-    name: esp-cam-2 restart
-
-binary_sensor:
-  - platform: status
-    name: esp-cam-2 status
-
-text_sensor:
-  - platform: wifi_info
-    ip_address:
-      name: IP-adres 2
-      icon: mdi:ip-network
+  - platform: esp32_rmt_led_strip
+    pin: GPIO14
+    num_leds: 24
+    chipset: WS2812
+    rgb_order: GRB
+    id: meterRingLight
+    name: ring light
+    default_transition_length: 0s
+    restore_mode: RESTORE_DEFAULT_ON

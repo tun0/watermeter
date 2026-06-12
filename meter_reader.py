@@ -37,30 +37,30 @@ CAM_SNAPSHOT_URL = os.environ.get("CAM_SNAPSHOT_URL", "http://192.168.x.x/")
 HA_URL           = os.environ.get("HA_URL", "")
 HA_TOKEN         = os.environ.get("HA_TOKEN", "")
 READING_INTERVAL = float(os.environ.get("READING_INTERVAL", "10"))
-ROTATE_DEG    = 243.0
+ROTATE_DEG    = 62.5
 
 # Digital digit crop boxes in rotated-image coordinates.
 # Each entry: (x, y, w, h) — ordered most-significant to least-significant.
-# Recalibrated 2026-06-03 after camera extension (improved focus/DOF).
+# Recalibrated 2026-06-12 after physical remount.
 DIGITAL_DIGITS = [
-    (723, 779, 48, 51),
-    (771, 779, 48, 51),
-    (819, 779, 48, 51),
-    (867, 779, 48, 51),
-    (915, 779, 48, 51),
+    (663, 916, 47, 50),
+    (710, 916, 47, 50),
+    (757, 916, 47, 50),
+    (804, 916, 47, 50),
+    (851, 916, 47, 50),
 ]
 
 # Full strip covering all digital digits; used by the strip OCR path.
-_DIGITAL_STRIP = (723, 779, 240, 51)
+_DIGITAL_STRIP = (663, 916, 237, 50)
 
 # Analog dial offsets from strip centre: (dx, dy, r, dark_needle, flip)
 # Ordered most-significant → least-significant.
-# Recalibrated 2026-06-03 via interactive calibration at ROTATE_DEG=243.0.
+# Recalibrated 2026-06-12 via interactive calibration at ROTATE_DEG=62.5.
 _ANALOG_DIAL_OFFSETS = [
-    (+267, +138, 65, False, False),  # ×0.1 m³
-    (+204, +286, 63, False, False),  # ×0.01 m³
-    ( +54, +342, 65, False, False),  # ×0.001 m³
-    ( -98, +274, 63, False, False),  # ×0.0001 m³
+    (+262, +133, 66, False, False),  # ×0.1 m³
+    (+200, +280, 65, False, False),  # ×0.01 m³
+    ( +51, +336, 65, False, False),  # ×0.001 m³
+    (-100, +267, 64, False, False),  # ×0.0001 m³
 ]
 
 def _make_analog_dials():
