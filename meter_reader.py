@@ -41,26 +41,26 @@ ROTATE_DEG    = 62.5
 
 # Digital digit crop boxes in rotated-image coordinates.
 # Each entry: (x, y, w, h) — ordered most-significant to least-significant.
-# Recalibrated 2026-06-12 after physical remount.
+# Recalibrated 2026-06-15 (fine-tune after OCR integer misread).
 DIGITAL_DIGITS = [
-    (663, 916, 47, 50),
-    (710, 916, 47, 50),
-    (757, 916, 47, 50),
-    (804, 916, 47, 50),
-    (851, 916, 47, 50),
+    (669, 911, 48, 52),
+    (717, 911, 48, 52),
+    (765, 911, 48, 52),
+    (813, 911, 48, 52),
+    (861, 911, 48, 52),
 ]
 
 # Full strip covering all digital digits; used by the strip OCR path.
-_DIGITAL_STRIP = (663, 916, 237, 50)
+_DIGITAL_STRIP = (669, 911, 242, 52)
 
 # Analog dial offsets from strip centre: (dx, dy, r, dark_needle, flip)
 # Ordered most-significant → least-significant.
-# Recalibrated 2026-06-12 via interactive calibration at ROTATE_DEG=62.5.
+# Recalibrated 2026-06-15 (fine-tune after OCR integer misread).
 _ANALOG_DIAL_OFFSETS = [
-    (+262, +133, 66, False, False),  # ×0.1 m³
-    (+200, +280, 65, False, False),  # ×0.01 m³
-    ( +51, +336, 65, False, False),  # ×0.001 m³
-    (-100, +267, 64, False, False),  # ×0.0001 m³
+    (+266, +135, 63, False, False),  # ×0.1 m³
+    (+200, +282, 66, False, False),  # ×0.01 m³
+    ( +53, +338, 63, False, False),  # ×0.001 m³
+    (-100, +268, 62, False, False),  # ×0.0001 m³
 ]
 
 def _make_analog_dials():
