@@ -28,6 +28,7 @@ from meter_reader import (
     DIGITAL_DIGITS,
     MAX_STEP,
     ROTATE_DEG,
+    _apply_rollover_bridge,
     angle_to_digit,
     assemble_reading,
     correct_gear_lash,
@@ -47,7 +48,8 @@ def _last_dial_digit(angle: float) -> int:
 
 
 def annotate_image(img: np.ndarray, filename: str = "",
-                   min_reading: float | None = None) -> tuple[str, np.ndarray, float | None]:
+                   min_reading: float | None = None,
+                   state: dict | None = None) -> tuple[str, np.ndarray, float | None]:
     """
     Returns (reading_str, annotated_img, used_float).
 
@@ -58,12 +60,14 @@ def annotate_image(img: np.ndarray, filename: str = "",
     digital    = read_digital_digits(rotated)
     angles_raw = read_analog_dials(rotated)
     angles_cor = correct_gear_lash(angles_raw)
-    digital    = resolve_rollover(digital, angles_cor, {})
+    st         = state or {}
+    digital    = resolve_rollover(digital, angles_cor, st)
 
     carried_forward = False
     used_float: float | None = None
     try:
         raw_val = assemble_reading(digital, angles_cor)
+        raw_val = _apply_rollover_bridge(raw_val, st)
         if min_reading is not None and (
                 raw_val < min_reading - 0.0005       # decrease not allowed
                 or raw_val > min_reading + MAX_STEP  # jump too large (bad OCR)
@@ -336,8 +340,9 @@ def main() -> None:
             errors += 1
             continue
 
+        st = {"last_reading": last_val} if last_val is not None else {}
         reading, ann, used_val = annotate_image(img, filename=f.name,
-                                                min_reading=last_val)
+                                                min_reading=last_val, state=st)
         out_path = out_dir / f.name
         cv2.imwrite(str(out_path), ann)
 

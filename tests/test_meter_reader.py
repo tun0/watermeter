@@ -217,3 +217,32 @@ def test_load_state_uses_initial_value(tmp_path, monkeypatch):
     monkeypatch.setattr(mr, "INITIAL_VALUE", 297.1234)
     state = mr.load_state()
     assert state["last_reading"] == pytest.approx(297.1234)
+
+
+# ── _apply_rollover_bridge ────────────────────────────────────────────────────
+
+def test_rollover_bridge_analog_wrapped():
+    # OCR still shows old integer, frac just wrapped to near 0 → bridge to N+1
+    state = {"last_reading": 303.9800}
+    assert mr._apply_rollover_bridge(303.0100, state) == pytest.approx(304.0100)
+
+
+def test_rollover_bridge_ocr_ahead():
+    # OCR jumped to 304, corrected frac still near 1 → keep old integer 303
+    state = {"last_reading": 303.9763}
+    assert mr._apply_rollover_bridge(304.9891, state) == pytest.approx(303.9891)
+
+
+def test_rollover_bridge_ocr_ahead_exits_when_frac_crosses():
+    # Once corrected frac drops below threshold (meter past transition window) → no bridge
+    state = {"last_reading": 303.9891}
+    assert mr._apply_rollover_bridge(304.0200, state) == pytest.approx(304.0200)
+
+
+def test_rollover_bridge_no_fire_mid_reading():
+    state = {"last_reading": 303.5000}
+    assert mr._apply_rollover_bridge(303.5200, state) == pytest.approx(303.5200)
+
+
+def test_rollover_bridge_no_state():
+    assert mr._apply_rollover_bridge(303.9891, {}) == pytest.approx(303.9891)

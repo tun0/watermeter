@@ -491,6 +491,40 @@ def resolve_rollover(digital: list[int | None],
     return result
 
 
+# ── Rollover bridge ────────────────────────────────────────────────────────────
+def _apply_rollover_bridge(reading: float, state: dict) -> float:
+    """
+    Correct the assembled reading at integer-rollover boundaries.
+
+    Case 1 — analog-ahead: corrected frac just wrapped to near-zero while OCR
+    still shows the old integer → infer integer+1.
+
+    Case 2 — ocr-ahead: OCR jumped to the new integer while corrected frac is
+    still near 1 (meter is in the DIAL_PHASE_CORRECTION transition window,
+    raw_frac ∈ [0, DIAL_PHASE_CORRECTION)) → keep old integer until dials cross.
+    """
+    if not state or "last_reading" not in state:
+        return reading
+    last = state["last_reading"]
+    frac = reading % 1.0
+    last_frac = last % 1.0
+    if (int(reading) == int(last) and
+            frac < ROLLOVER_BRIDGE_THRESHOLD and
+            last_frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
+        old_int = int(reading)
+        reading = round(old_int + 1 + frac, 4)
+        log.debug("rollover bridge: analog wrapped, integer %d→%d  frac=%.4f",
+                  old_int, old_int + 1, frac)
+    elif (int(reading) == int(last) + 1 and
+            frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD and
+            last_frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
+        old_int = int(last)
+        reading = round(old_int + frac, 4)
+        log.debug("rollover bridge (ocr-ahead): ocr integer %d→%d  frac=%.4f",
+                  old_int + 1, old_int, frac)
+    return reading
+
+
 # ── Sanity guards ──────────────────────────────────────────────────────────────
 def load_state() -> dict:
     try:
@@ -614,20 +648,7 @@ def process(img: np.ndarray, debug: bool = False,
 
     reading = assemble_reading(digital, angles_cor)
 
-    # Rollover bridge: if the corrected fractional just wrapped to near-zero
-    # while the digital OCR still shows the old integer, trust the analog and
-    # infer integer+1.  Fires for both multi-digit rollovers (where OCR catches
-    # up at the wrap point) and single-digit rollovers (where OCR detects late).
-    if state and "last_reading" in state:
-        last = state["last_reading"]
-        frac = reading % 1.0
-        if (int(reading) == int(last) and
-                frac < ROLLOVER_BRIDGE_THRESHOLD and
-                last % 1.0 > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
-            old_int = int(reading)
-            reading = round(old_int + 1 + frac, 4)
-            log.debug("rollover bridge: analog wrapped, integer %d→%d  frac=%.4f",
-                      old_int, old_int + 1, frac)
+    reading = _apply_rollover_bridge(reading, state)
 
     log.debug("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
               digital,
