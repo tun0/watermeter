@@ -207,6 +207,16 @@ def read_digital_digits(img: np.ndarray,
                 log.debug("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last known",
                           i, d, last_digs[i], rollover)
                 digits[i] = last_digs[i]
+        # Guard against compound spurious increments: each digit passes the
+        # per-digit rollover check in isolation but the assembled integer may
+        # still be far from last_int (e.g. tens "0"→"1" + units "4"→"5" both
+        # look like valid rollovers but produce +11 m³). Reject anything more
+        # than ±1 m³ away; revert to last known integer.
+        assembled = int("".join(str(d) for d in digits))
+        if abs(assembled - last_int) > 1:
+            log.info("per-digit assembled %d implausible vs last=%d — reverting to last known",
+                     assembled, last_int)
+            digits = list(last_digs)
     return digits
 
 
@@ -544,6 +554,12 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
     if last is None:
         return True, "first reading"
     delta = new_val - last
+    # Allow a clean integer rollover: the meter crossed an integer boundary and
+    # the dials just reset to near-zero (corrected_frac < ROLLOVER_BRIDGE_THRESHOLD).
+    # This always produces delta ≈ +1.0 which would otherwise exceed MAX_STEP.
+    if (int(new_val) == int(last) + 1 and
+            new_val % 1.0 < ROLLOVER_BRIDGE_THRESHOLD):
+        return True, "ok (rollover)"
     if abs(delta) > MAX_STEP:
         return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP} ({last:.4f} → {new_val:.4f})"
     if not ALLOW_DECREASE and delta < -JITTER_TOLERANCE:
