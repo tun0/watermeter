@@ -188,7 +188,8 @@ def read_digital_digits(img: np.ndarray,
             # With MAX_STEP=0.05 m³ the integer can only advance by 0 or 1 per
             # sample, so a threshold of 2 is generous while blocking misreads
             # like 8→3 (diff=5) slipping through as a plausible strip result.
-            if last_int is None or abs(int("".join(str(d) for d in digits)) - last_int) <= 2:
+            assembled_int = int("".join(str(d) for d in digits))
+            if last_int is None or 0 <= assembled_int - last_int <= 1:
                 return digits
             log.info("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
                      result, result.zfill(n), last_int)
@@ -213,7 +214,7 @@ def read_digital_digits(img: np.ndarray,
         # look like valid rollovers but produce +11 m³). Reject anything more
         # than ±1 m³ away; revert to last known integer.
         assembled = int("".join(str(d) for d in digits))
-        if abs(assembled - last_int) > 1:
+        if not (0 <= assembled - last_int <= 1):
             log.info("per-digit assembled %d implausible vs last=%d — reverting to last known",
                      assembled, last_int)
             digits = list(last_digs)
@@ -554,12 +555,6 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
     if last is None:
         return True, "first reading"
     delta = new_val - last
-    # Allow a clean integer rollover: the meter crossed an integer boundary and
-    # the dials just reset to near-zero (corrected_frac < ROLLOVER_BRIDGE_THRESHOLD).
-    # This always produces delta ≈ +1.0 which would otherwise exceed MAX_STEP.
-    if (int(new_val) == int(last) + 1 and
-            new_val % 1.0 < ROLLOVER_BRIDGE_THRESHOLD):
-        return True, "ok (rollover)"
     if abs(delta) > MAX_STEP:
         return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP} ({last:.4f} → {new_val:.4f})"
     if not ALLOW_DECREASE and delta < -JITTER_TOLERANCE:
