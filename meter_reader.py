@@ -41,26 +41,26 @@ ROTATE_DEG    = 62.5
 
 # Digital digit crop boxes in rotated-image coordinates.
 # Each entry: (x, y, w, h) — ordered most-significant to least-significant.
-# Recalibrated 2026-06-15 (fine-tune after OCR integer misread).
+# Recalibrated 2026-06-22 (camera shifted on node move mars→saturn).
 DIGITAL_DIGITS = [
-    (669, 911, 48, 52),
-    (717, 911, 48, 52),
-    (765, 911, 48, 52),
-    (813, 911, 48, 52),
-    (861, 911, 48, 52),
+    (654, 911, 48, 50),
+    (702, 911, 48, 50),
+    (750, 911, 48, 50),
+    (798, 911, 48, 50),
+    (846, 911, 48, 50),
 ]
 
 # Full strip covering all digital digits; used by the strip OCR path.
-_DIGITAL_STRIP = (669, 911, 242, 52)
+_DIGITAL_STRIP = (654, 911, 244, 50)
 
 # Analog dial offsets from strip centre: (dx, dy, r, dark_needle, flip)
 # Ordered most-significant → least-significant.
-# Recalibrated 2026-06-15 (fine-tune after OCR integer misread).
+# Recalibrated 2026-06-22 (camera shifted on node move mars→saturn).
 _ANALOG_DIAL_OFFSETS = [
-    (+266, +135, 63, False, False),  # ×0.1 m³
-    (+200, +282, 66, False, False),  # ×0.01 m³
-    ( +53, +338, 63, False, False),  # ×0.001 m³
-    (-100, +268, 62, False, False),  # ×0.0001 m³
+    (+262, +131, 61, False, False),  # ×0.1 m³
+    (+199, +280, 61, False, False),  # ×0.01 m³
+    ( +50, +335, 61, False, False),  # ×0.001 m³
+    (-100, +267, 65, False, False),  # ×0.0001 m³
 ]
 
 def _make_analog_dials():
