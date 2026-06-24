@@ -298,12 +298,12 @@ def assemble_reading(digital: list[int | None],
 # ── Rollover coverage ──────────────────────────────────────────────────────────
 
 def corrected_fraction(raw_angles: list[float | None]) -> float | None:
-    """Fractional reading derived from corrected dial digits (0.0–1.0)."""
+    """Fractional reading using the same boundary-corrected logic as assemble_reading."""
     if any(a is None for a in raw_angles):
         return None
     total = sum(
-        corrected_digit(corrected_angle(raw, DIAL_ZERO_OFFSETS[i])) * 10 ** -(i + 1)
-        for i, raw in enumerate(raw_angles)
+        dial_influenced_digit(i, raw_angles) * 10 ** -(i + 1)
+        for i in range(len(raw_angles))
     )
     return round(total, 4)
 
@@ -346,12 +346,12 @@ def rollover_coverage(digital: list[int | None],
     if frac >= ROLLOVER_START:
         for pos in transitioning:
             result[pos] = last_digs[pos]
-        log.debug("rollover: in progress frac=%.4f, forcing %s → old", frac, transitioning)
+        log.info("rollover: in progress frac=%.4f, forcing digits %s → old", frac, transitioning)
     elif last_frac >= ROLLOVER_START:
         for pos in transitioning:
             result[pos] = (last_digs[pos] + 1) % 10
-        log.debug("rollover: complete frac=%.4f (was %.4f), forcing %s → new",
-                  frac, last_frac, transitioning)
+        log.info("rollover: complete frac=%.4f (was %.4f), forcing digits %s → new",
+                 frac, last_frac, transitioning)
 
     return result
 
@@ -404,7 +404,7 @@ def annotate(img: np.ndarray, digital: list[int | None],
         if digital[i] is not None:
             cv2.putText(out, str(digital[i]), (x, y - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2)
-    for i, (cx, cy, r, _, _) in enumerate(ANALOG_DIALS):
+    for i, (cx, cy, r) in enumerate(ANALOG_DIALS):
         cv2.circle(out, (cx, cy), r, (255, 160, 0), 2)
         raw  = raw_angles[i]
         corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[i]) if raw is not None else None
