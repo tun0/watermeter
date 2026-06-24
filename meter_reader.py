@@ -39,9 +39,24 @@ import pytesseract
 import requests
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# All values are read from environment variables. Missing required variables
-# cause an explicit failure at startup. See .env.dist for all variables and
-# their reference defaults.
+# .env.dist (co-located with this file) is loaded as a defaults layer on startup.
+# Env vars already set (e.g. from a configmap or .env) take precedence.
+# Required variables not covered by .env.dist or the environment cause an
+# explicit failure at startup.
+
+def _load_env_dist() -> None:
+    env_dist = Path(__file__).parent / ".env.dist"
+    if not env_dist.exists():
+        return
+    for line in env_dist.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        os.environ.setdefault(key.strip(), value.strip())
+
+_load_env_dist()
+
 
 def _env(name: str) -> str:
     val = os.environ.get(name)
