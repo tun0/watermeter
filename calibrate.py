@@ -13,7 +13,7 @@ Usage:
 
   python3 calibrate.py --image snapshots/.../foo.jpg --rotation 68.0 --interactive
       Click-based calibration: define strip corners and dial positions visually.
-      Prints ready-to-paste constants for meter_reader.py.
+      Prints ready-to-paste environment variable values.
       Controls: left-click to place, U = undo, Enter = confirm, Q/Esc = quit.
 """
 
@@ -61,7 +61,7 @@ def strip_slope(rotated: np.ndarray, sx: int, sy: int, sw: int, sh: int) -> floa
 
 def scan_rotation(img: np.ndarray, deg_start: float, deg_end: float, deg_step: float,
                   strip: tuple = None):
-    sx, sy, sw, sh = strip if strip else mr._DIGITAL_STRIP
+    sx, sy, sw, sh = strip if strip else mr.DIGITAL_STRIP
     best_deg, best_slope = None, float("inf")
     print(f"{'deg':>7}  {'slope':>10}")
     for i in range(round((deg_end - deg_start) / deg_step) + 1):
@@ -86,11 +86,11 @@ def save_grid(img: np.ndarray, deg: float, out_path: str = "grid.jpg"):
         cv2.putText(out, f"D{i}", (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 0), 2)
 
     # Draw strip
-    sx, sy, sw, sh = mr._DIGITAL_STRIP
+    sx, sy, sw, sh = mr.DIGITAL_STRIP
     cv2.rectangle(out, (sx, sy), (sx + sw, sy + sh), (0, 200, 200), 2)
 
     # Draw dial circles
-    for i, (cx, cy, r, _, _) in enumerate(mr.ANALOG_DIALS):
+    for i, (cx, cy, r) in enumerate(mr.ANALOG_DIALS):
         cv2.circle(out, (cx, cy), r, (255, 160, 0), 2)
         cv2.putText(out, f"A{i}", (cx - 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 160, 0), 2)
 
@@ -221,26 +221,19 @@ def interactive_calibration(img: np.ndarray, deg: float):
     digit_w = sw // 5
     digits  = [(sx + i * digit_w, sy, digit_w, sh) for i in range(5)]
 
-    strip_cx = sx + sw // 2
-    strip_cy = sy + sh // 2
-
-    offsets = []
+    dial_coords = []
     for i in range(4):
         cx, cy = clicks[2 + i * 2]
         r = int(math.hypot(clicks[3 + i * 2][0] - cx, clicks[3 + i * 2][1] - cy))
-        offsets.append((cx - strip_cx, cy - strip_cy, r))
+        dial_coords.append((cx, cy, r))
 
-    print(f"\n# ── Paste into meter_reader.py {'─' * 38}")
-    print(f"ROTATE_DEG = {deg}")
-    print(f"_DIGITAL_STRIP = ({sx}, {sy}, {sw}, {sh})")
-    print("DIGITAL_DIGITS = [")
-    for x, y, dw2, dh2 in digits:
-        print(f"    ({x}, {y}, {dw2}, {dh2}),")
-    print("]  # auto-split; adjust x/w per digit if OCR struggles")
-    print("\n_ANALOG_DIAL_OFFSETS = [  # (dx, dy, r) from strip centre")
-    for i, (dx, dy, r) in enumerate(offsets):
-        print(f"    ({dx:+d}, {dy:+d}, {r}, False, False),  # {DIAL_LABELS[i]}")
-    print("]")
+    print(f"\n# ── Paste into environment / configmap {'─' * 30}")
+    print(f"ROTATE_DEG={deg}")
+    print(f"DIGITAL_STRIP={sx},{sy},{sw},{sh}")
+    digit_str = ";".join(f"{x},{y},{dw2},{dh2}" for x, y, dw2, dh2 in digits)
+    print(f"DIGITAL_DIGITS={digit_str}  # auto-split; adjust per digit if OCR struggles")
+    dial_str = ";".join(f"{cx},{cy},{r}" for cx, cy, r in dial_coords)
+    print(f"ANALOG_DIALS={dial_str}")
     print(f"# {'─' * 55}")
 
 
@@ -259,7 +252,7 @@ def main():
     ap.add_argument("--interactive", action="store_true",
                     help="Click-based calibration: define strip and dial positions visually")
     ap.add_argument("--strip", type=int, nargs=4, metavar=("X","Y","W","H"),
-                    help="Strip ROI to use for rotation scan (overrides meter_reader._DIGITAL_STRIP)")
+                    help="Strip ROI to use for rotation scan (overrides meter_reader.DIGITAL_STRIP)")
     ap.add_argument("--scan-start", type=float, default=None)
     ap.add_argument("--scan-end",   type=float, default=None)
     ap.add_argument("--scan-step",  type=float, default=0.5)

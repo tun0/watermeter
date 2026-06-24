@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY meter_reader.py .
+COPY .env.dist .
 
 
 FROM base AS test
@@ -24,11 +25,5 @@ CMD ["pytest", "-v"]
 
 
 FROM base AS production
-
-ENV CAM_SNAPSHOT_URL=http://192.168.x.x/
-ENV READING_INTERVAL=10
-ENV HA_URL=
-ENV HA_TOKEN=
-ENV STATE_FILE=/app/data/.meter_state.json
 
 CMD ["python3", "-u", "meter_reader.py", "--loop"]

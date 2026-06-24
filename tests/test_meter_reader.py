@@ -1,16 +1,236 @@
+"""
+Tests for meter_reader.py logic.
+
+All pure-logic functions are tested with injected values; no env var dependency
+at test time (conftest.py sets the required env vars before import).
+
+The .env.dist completeness test verifies that every _env() call in the module
+has a corresponding entry in .env.dist, and that loading .env.dist values (plus
+a dummy CAM_SNAPSHOT_URL) is sufficient to initialise the module.
+"""
+import os
+import re
+import time
+from pathlib import Path
+
 import pytest
 
 import meter_reader as mr
 
-# ── angle_to_digit ────────────────────────────────────────────────────────────
+# Zero offsets loaded from conftest env (126, 270, 270, 0).
+Z = [126.0, 270.0, 270.0, 0.0]
 
-def test_angle_to_digit_boundaries():
-    assert mr.angle_to_digit(0.0) == 0
-    assert mr.angle_to_digit(35.9) == 0
-    assert mr.angle_to_digit(36.0) == 1
-    assert mr.angle_to_digit(324.0) == 9
-    assert mr.angle_to_digit(359.9) == 9
-    assert mr.angle_to_digit(360.0) == 0  # wraps
+
+# ── corrected_angle ───────────────────────────────────────────────────────────
+
+def test_corrected_angle_zero():
+    assert mr.corrected_angle(126.0, 126.0) == pytest.approx(0.0)
+
+def test_corrected_angle_basic():
+    assert mr.corrected_angle(216.0, 126.0) == pytest.approx(90.0)
+
+def test_corrected_angle_wraparound():
+    assert mr.corrected_angle(100.0, 126.0) == pytest.approx(334.0)
+
+def test_corrected_angle_full_wrap():
+    assert mr.corrected_angle(126.0 + 360.0, 126.0) == pytest.approx(0.0)
+
+
+# ── corrected_digit ───────────────────────────────────────────────────────────
+
+def test_corrected_digit_zero():
+    assert mr.corrected_digit(0.0) == 0
+
+def test_corrected_digit_mid():
+    assert mr.corrected_digit(90.0) == 2   # 90/36 = 2.5 → int = 2
+
+def test_corrected_digit_nine():
+    assert mr.corrected_digit(324.0) == 9
+
+def test_corrected_digit_wraps():
+    assert mr.corrected_digit(360.0) == 0
+
+
+# ── dial_influenced_digit ─────────────────────────────────────────────────────
+# Use zero_offsets = [0, 0, 0, 0] for simple cases by overriding the module attr.
+
+@pytest.fixture()
+def zero_offsets(monkeypatch):
+    monkeypatch.setattr(mr, "DIAL_ZERO_OFFSETS", [0.0, 0.0, 0.0, 0.0])
+
+
+def test_dial_influence_no_correction_mid(zero_offsets):
+    # A0 at digit 3 (108°), A1 at 180° (sub=0.5, mid-revolution) — no correction
+    angles = [108.0, 180.0, 180.0, 180.0]
+    assert mr.dial_influenced_digit(0, angles) == 3
+
+def test_dial_influence_advance_when_both_confirm(zero_offsets):
+    # A0 sub_frac=0.94 (near upper boundary of digit 3), A1 corrected=18° (5% → below LOW=0.15)
+    # → should advance to digit 4
+    angles = [3 * 36 + 0.94 * 36, 18.0, 0.0, 0.0]
+    assert mr.dial_influenced_digit(0, angles) == 4
+
+def test_dial_influence_no_advance_when_driver_not_past_zero(zero_offsets):
+    # A0 sub_frac=0.94 but A1 corrected=300° (83% → above LOW) — driver hasn't passed zero
+    angles = [3 * 36 + 0.94 * 36, 300.0, 0.0, 0.0]
+    assert mr.dial_influenced_digit(0, angles) == 3
+
+def test_dial_influence_retreat_when_both_confirm(zero_offsets):
+    # A0 sub_frac=0.05 (just crossed boundary into digit 4), A1 corrected=342° (95% → above HIGH)
+    # → driver hasn't completed revolution, A0 hasn't actually crossed → retreat to digit 3
+    angles = [4 * 36 + 0.05 * 36, 342.0, 0.0, 0.0]
+    assert mr.dial_influenced_digit(0, angles) == 3
+
+def test_dial_influence_no_retreat_when_driver_past_zero(zero_offsets):
+    # A0 sub_frac=0.05 but A1 corrected=20° (5.6% → below HIGH) — driver already past zero
+    angles = [4 * 36 + 0.05 * 36, 20.0, 0.0, 0.0]
+    assert mr.dial_influenced_digit(0, angles) == 4
+
+def test_dial_influence_last_dial_no_driver(zero_offsets):
+    # A3 has no driver (index 4 out of range) — returns direct digit
+    angles = [0.0, 0.0, 0.0, 108.0]
+    assert mr.dial_influenced_digit(3, angles) == 3
+
+def test_dial_influence_none_raw_returns_zero(zero_offsets):
+    angles = [None, 180.0, 180.0, 180.0]
+    assert mr.dial_influenced_digit(0, angles) == 0
+
+def test_dial_influence_none_driver_no_correction(zero_offsets):
+    # Driver is None → no correction, return direct digit
+    angles = [3 * 36 + 0.94 * 36, None, 0.0, 0.0]
+    assert mr.dial_influenced_digit(0, angles) == 3
+
+def test_dial_influence_cascade_a1_uses_a2(zero_offsets):
+    # Cascade: A1 boundary correction driven by A2
+    angles = [180.0, 2 * 36 + 0.94 * 36, 18.0, 0.0]
+    assert mr.dial_influenced_digit(1, angles) == 3
+
+
+# ── assemble_reading ──────────────────────────────────────────────────────────
+
+def test_assemble_reading_raises_on_none_digit():
+    with pytest.raises(ValueError, match="OCR failure"):
+        mr.assemble_reading([None, 0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0])
+
+def test_assemble_reading_raises_on_none_angle():
+    with pytest.raises(ValueError, match="Needle detection"):
+        mr.assemble_reading([0, 0, 0, 0, 0], [None, 0.0, 0.0, 0.0])
+
+def test_assemble_reading_integer_part():
+    # With all dials at zero_offset → corrected 0 → digit 0 → fractional 0
+    raw = Z  # each dial at its zero_offset → corrected angle 0 → digit 0
+    reading = mr.assemble_reading([0, 0, 2, 9, 7], raw)
+    assert int(reading) == 297
+
+def test_assemble_reading_fractional():
+    # A0 at zero_offset+36 → corrected 36 → digit 1 → contributes 0.1
+    # All others at zero_offset → digit 0
+    raw = [Z[0] + 36.0, Z[1], Z[2], Z[3]]
+    reading = mr.assemble_reading([0, 0, 0, 0, 0], raw)
+    assert reading == pytest.approx(0.1, abs=1e-4)
+
+
+# ── corrected_fraction ────────────────────────────────────────────────────────
+
+def test_corrected_fraction_all_zeros():
+    assert mr.corrected_fraction(Z) == pytest.approx(0.0)
+
+def test_corrected_fraction_none_returns_none():
+    assert mr.corrected_fraction([None, Z[1], Z[2], Z[3]]) is None
+
+def test_corrected_fraction_9000():
+    # A0 corrected digit 9 (raw = Z[0] + 9*36 = 126+324=450 % 360 = 90)
+    # A1,A2,A3 at zero → digits 0
+    raw = [Z[0] + 9 * 36, Z[1], Z[2], Z[3]]
+    assert mr.corrected_fraction(raw) == pytest.approx(0.9, abs=1e-4)
+
+
+# ── rollover_coverage ─────────────────────────────────────────────────────────
+
+def _state(last: float, last_frac_override: float | None = None) -> dict:
+    """Helper: state dict with last_reading and optional fractional override."""
+    s = {"last_reading": last}
+    if last_frac_override is not None:
+        # Encode the desired fractional into last_reading
+        s["last_reading"] = int(last) + last_frac_override
+    return s
+
+def _angles_for_frac(frac: float) -> list[float]:
+    """Raw angles that produce a given corrected_fraction (using A0 only, others at 0)."""
+    # frac = d0 * 0.1, so d0 = round(frac / 0.1)
+    # Use A0 to encode the leading digit; others all at zero offset
+    d0 = round(frac * 10) % 10
+    return [Z[0] + d0 * 36, Z[1], Z[2], Z[3]]
+
+def test_rollover_in_progress_forces_old_digit():
+    # 306→307: during rollover only D4 transitions (D4=6, not 9)
+    # last_int=306 → last_digs=[0,0,3,0,6]
+    state  = {"last_reading": 306.5}
+    angles = _angles_for_frac(0.9)
+    result = mr.rollover_coverage([0, 0, 3, 7, 5], angles, state)
+    # Only D4 in transitioning; forced to old value
+    assert result == [0, 0, 3, 7, 6]
+
+def test_rollover_complete_forces_new_digit():
+    # 306.9 → just completed: D4 forced to new value (7)
+    state  = {"last_reading": 306.9}
+    angles = _angles_for_frac(0.0)
+    result = mr.rollover_coverage([0, 0, 3, 0, 5], angles, state)
+    assert result == [0, 0, 3, 0, 7]
+
+def test_rollover_in_progress_forces_9_when_was_9():
+    # 309.5: D4=9, D3=0; transitioning=[4,3]; during → D4=9, D3=0
+    state  = {"last_reading": 309.5}
+    angles = _angles_for_frac(0.9)
+    result = mr.rollover_coverage([0, 0, 3, 7, 5], angles, state)
+    assert result == [0, 0, 3, 0, 9]
+
+def test_rollover_complete_forces_0_when_was_9():
+    # 309.9 → just completed: D4=0, D3=1
+    state  = {"last_reading": 309.9}
+    angles = _angles_for_frac(0.0)
+    result = mr.rollover_coverage([0, 0, 3, 7, 5], angles, state)
+    assert result == [0, 0, 3, 1, 0]
+
+def test_rollover_mid_reading_no_change():
+    state  = {"last_reading": 306.3}
+    angles = _angles_for_frac(0.4)
+    digital = [0, 0, 3, 0, 5]
+    assert mr.rollover_coverage(digital, angles, state) == digital
+
+def test_rollover_no_state_no_change():
+    digital = [0, 0, 3, 0, 5]
+    assert mr.rollover_coverage(digital, _angles_for_frac(0.9), {}) == digital
+
+def test_rollover_cascade_299_to_300():
+    # last_int=299 → last_digs=[0,0,2,9,9]; transitioning=[4,3,2]
+    # During: D4=9, D3=9, D2=2; D1 and D0 untouched
+    state  = {"last_reading": 299.5}
+    angles = _angles_for_frac(0.9)
+    result = mr.rollover_coverage([0, 0, 3, 5, 7], angles, state)
+    assert result == [0, 0, 2, 9, 9]
+
+def test_rollover_cascade_299_complete():
+    # After 299→300: D4=0, D3=0, D2=3; D1 and D0 untouched
+    state  = {"last_reading": 299.9}
+    angles = _angles_for_frac(0.0)
+    result = mr.rollover_coverage([0, 0, 3, 5, 7], angles, state)
+    assert result == [0, 0, 3, 0, 0]
+
+def test_rollover_cascade_stops_at_non_nine():
+    # last_int=294 → last_digs=[0,0,2,9,4]; transitioning=[4] only (D4=4 ≠ 9)
+    state  = {"last_reading": 294.5}
+    angles = _angles_for_frac(0.9)
+    result = mr.rollover_coverage([0, 0, 2, 9, 7], angles, state)
+    # D4 forced to 4; all others unchanged
+    assert result == [0, 0, 2, 9, 4]
+
+def test_rollover_none_angles_no_change():
+    state  = {"last_reading": 306.5}
+    angles = [None, Z[1], Z[2], Z[3]]
+    digital = [0, 0, 3, 0, 5]
+    result = mr.rollover_coverage(digital, angles, state)
+    assert result == digital
 
 
 # ── validate ──────────────────────────────────────────────────────────────────
@@ -20,229 +240,110 @@ def test_validate_first_reading():
     assert ok
     assert reason == "first reading"
 
-
 def test_validate_ok():
-    ok, _ = mr.validate(100.0 + mr.MAX_STEP / 2, {"last_reading": 100.0})
+    ok, _ = mr.validate(100.02, {"last_reading": 100.0})
     assert ok
-
 
 def test_validate_at_max_step():
     ok, _ = mr.validate(100.0 + mr.MAX_STEP, {"last_reading": 100.0})
     assert ok
 
-
 def test_validate_jump_too_large():
     ok, reason = mr.validate(100.0 + mr.MAX_STEP + 0.001, {"last_reading": 100.0})
     assert not ok
-    assert "MAX_STEP" in reason
+    assert "exceeds allowed" in reason
 
+def test_validate_decrease_within_jitter():
+    ok, _ = mr.validate(100.0 - mr.JITTER_TOLERANCE / 2, {"last_reading": 100.0})
+    assert ok
 
-def test_validate_decrease():
-    ok, reason = mr.validate(100.0 - mr.MAX_STEP / 2, {"last_reading": 100.0})
+def test_validate_decrease_exceeds_jitter():
+    ok, reason = mr.validate(100.0 - mr.JITTER_TOLERANCE - 0.001, {"last_reading": 100.0})
     assert not ok
-    assert "decrease" in reason
+    assert "jitter" in reason
+
+def test_validate_scales_with_elapsed(monkeypatch):
+    # Simulate a 30s gap (3 intervals) — allowed should be 3 × MAX_STEP
+    old_ts = time.time() - 30
+    state  = {"last_reading": 100.0, "last_reading_ts": old_ts}
+    allowed = mr.MAX_STEP * 3
+    ok, _  = mr.validate(100.0 + allowed, state)
+    assert ok
+
+def test_validate_cap_limits_scaled_delta(monkeypatch):
+    # Very long gap, but cap prevents accepting unlimited delta
+    old_ts = time.time() - 10000
+    state  = {"last_reading": 100.0, "last_reading_ts": old_ts}
+    ok, reason = mr.validate(100.0 + mr.MAX_DELTA_CAP + 0.001, state)
+    assert not ok
+
+def test_validate_no_timestamp_uses_max_step():
+    ok, reason = mr.validate(100.0 + mr.MAX_STEP + 0.001,
+                             {"last_reading": 100.0})
+    assert not ok
 
 
-# ── _dial_fraction ────────────────────────────────────────────────────────────
+# ── .env.dist completeness ────────────────────────────────────────────────────
 
-def test_dial_fraction_none_inputs():
-    assert mr._dial_fraction(None, None) is None
-    assert mr._dial_fraction(45.0, None) is None
-    assert mr._dial_fraction(None, 0.0) is None
+def test_env_dist_covers_all_required_vars():
+    """Every _env("VAR") call in meter_reader.py must appear in .env.dist."""
+    src = Path(__file__).parent.parent / "meter_reader.py"
+    env_dist = Path(__file__).parent.parent / ".env.dist"
 
+    required = set(re.findall(r'_env\("([^"]+)"\)', src.read_text()))
+    dist_text = env_dist.read_text()
+    dist_vars = set(re.findall(r'^#?([A-Z_]+)=', dist_text, re.MULTILINE))
 
-def test_dial_fraction_basic():
-    assert mr._dial_fraction(90.0, 0.0) == pytest.approx(0.25)
+    missing = required - dist_vars
+    assert not missing, f"Variables in _env() calls but missing from .env.dist: {missing}"
 
+def test_env_dist_sufficient_to_init(monkeypatch, tmp_path):
+    """
+    Loading .env.dist values (plus a dummy CAM_SNAPSHOT_URL) must be sufficient
+    to import and initialise meter_reader without error.
+    """
+    env_dist = Path(__file__).parent.parent / ".env.dist"
+    dist_vars = {}
+    for line in env_dist.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '=' in line:
+            k, _, v = line.partition('=')
+            dist_vars[k.strip()] = v.strip()
 
-def test_dial_fraction_wraparound():
-    assert mr._dial_fraction(10.0, 20.0) == pytest.approx(350.0 / 360.0)
+    # Provide required site-specific values not set in .env.dist
+    dist_vars.setdefault("CAM_SNAPSHOT_URL", "http://test.example.com/")
+    dist_vars["STATE_FILE"] = str(tmp_path / "state.json")
 
-
-def test_dial_fraction_coincident():
-    assert mr._dial_fraction(45.0, 45.0) == pytest.approx(0.0)
-
-
-# ── assemble_reading ──────────────────────────────────────────────────────────
-
-def test_assemble_reading_raises_on_none_digit():
-    with pytest.raises(ValueError, match="OCR failure"):
-        mr.assemble_reading([None, 0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0])
-
-
-def test_assemble_reading_raises_on_none_angle():
-    with pytest.raises(ValueError, match="Needle detection"):
-        mr.assemble_reading([0, 0, 0, 0, 0], [None, 0.0, 0.0, 0.0])
-
-
-def test_assemble_reading_all_zeros():
-    # All dials at 0° → analog digits all 0 → raw frac 0.0, corrected = (0 - 0.1111) % 1 = 0.8889
-    reading = mr.assemble_reading([0, 0, 0, 0, 0], [0.0, 0.0, 0.0, 0.0])
-    assert reading == pytest.approx((0.0 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
-
-
-def test_assemble_reading_integer_from_digital():
-    reading = mr.assemble_reading([0, 0, 2, 9, 7], [0.0, 0.0, 0.0, 0.0])
-    assert reading == pytest.approx(297 + (0.0 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
-
-
-def test_assemble_reading_last_dial_rounds_up():
-    # Last dial just past the 0.5 mark of digit 0 → rounds up to 1
-    # 0.5 frac of digit 0 = 18°; just above: 18.5°
-    reading = mr.assemble_reading([0, 0, 0, 0, 0], [0.0, 0.0, 0.0, 18.5])
-    # last analog digit becomes 1 → fractional = (0.0001 + DIAL_PHASE_CORRECTION) % 1
-    assert reading == pytest.approx((0.0001 + mr.DIAL_PHASE_CORRECTION) % 1.0, abs=1e-4)
-
-
-# ── correct_gear_lash ─────────────────────────────────────────────────────────
-
-def test_correct_gear_lash_no_snap_mid_reading():
-    angles = [180.0, 180.0, 180.0, 180.0]
-    assert mr.correct_gear_lash(angles) == angles
-
-
-def test_correct_gear_lash_none_passthrough():
-    angles = [None, 180.0, None, 180.0]
-    assert mr.correct_gear_lash(angles) == angles
-
-
-def test_correct_gear_lash_pass1_high_frac():
-    # dial[1] at 10° (digit 0, inside LASH_EXT_DEG window)
-    # dial[0] at 250° → digit 6, frac ≈ 0.94 > LASH_HIGH → snap to digit 7 (252°)
-    angles = [250.0, 10.0, 180.0, 180.0]
-    result = mr.correct_gear_lash(angles)
-    assert result[0] == 7 * 36
-    assert result[1:] == angles[1:]
-
-
-def test_correct_gear_lash_pass1_low_frac_core_zone():
-    # dial[1] at 5° (digit 0, in_core_zone); dial[0] at 5° → frac ≈ 0.14 < LASH_LOW → snap to 1
-    angles = [5.0, 5.0, 180.0, 180.0]
-    result = mr.correct_gear_lash(angles)
-    assert result[0] == 1 * 36
-
-
-def test_correct_gear_lash_pass1_no_snap_beyond_ext():
-    # dial[1] at 150° — beyond LASH_EXT_DEG (120°) → no trigger
-    angles = [250.0, 150.0, 180.0, 180.0]
-    result = mr.correct_gear_lash(angles)
-    assert result[0] == 250.0
-
-
-def test_correct_gear_lash_pass2_near_zero():
-    # dial[1] at 358° → digit 9, frac ≈ 0.944 >= LASH_NEAR_ZERO → snap to 0°
-    # dial[0] at 250° → frac > LASH_HIGH → snap to digit 7
-    angles = [250.0, 358.0, 180.0, 180.0]
-    result = mr.correct_gear_lash(angles)
-    assert result[1] == 0.0
-    assert result[0] == 7 * 36
-
-
-# ── resolve_rollover ──────────────────────────────────────────────────────────
-
-def _rollover_state(last_reading: float, offsets: list) -> dict:
-    return {"last_reading": last_reading, "dial_zero_offsets": offsets}
-
-
-def test_resolve_rollover_no_state():
-    digital = [0, 0, 2, 9, 7]
-    assert mr.resolve_rollover(digital, [0.0] * 4, {}) == digital
-
-
-def test_resolve_rollover_correct_up():
-    # pos4 (units): last=7, OCR=7 (old), dial just crossed zero → correct to 8
-    # zero_offset=10°; angle=15° → frac=(15-10)/360 ≈ 0.014 < _ROLLOVER_BAND=0.15
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    result = mr.resolve_rollover([0, 0, 2, 9, 7], [15.0, 0.0, 0.0, 0.0], state)
-    assert result[4] == 8
-
-
-def test_resolve_rollover_correct_down():
-    # pos4 (units): last=7, OCR=8 (new), dial hasn't crossed zero → correct to 7
-    # zero_offset=10°; angle=330° → frac=(330-10)/360 ≈ 0.889 > 1-0.15=0.85
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    result = mr.resolve_rollover([0, 0, 2, 9, 8], [330.0, 0.0, 0.0, 0.0], state)
-    assert result[4] == 7
-
-
-def test_resolve_rollover_no_change_mid_digit():
-    # Dial fraction is mid-range — no rollover ambiguity
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    digital = [0, 0, 2, 9, 7]
-    result = mr.resolve_rollover(digital, [180.0, 0.0, 0.0, 0.0], state)
-    assert result == digital
-
-
-def test_resolve_rollover_corrects_garbled_digit():
-    # OCR reads 9 for units position during 7→8 transition (not in {7,8}) — dial
-    # confirms the rollover has passed → must still correct to 8.
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    result = mr.resolve_rollover([0, 0, 2, 9, 9], [15.0, 0.0, 0.0, 0.0], state)
-    assert result[4] == 8
-
-
-def test_resolve_rollover_corrects_none_digit():
-    # OCR returns None for units during transition — dial is past zero → fill with expected_new.
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    result = mr.resolve_rollover([0, 0, 2, 9, None], [15.0, 0.0, 0.0, 0.0], state)
-    assert result[4] == 8
-
-
-def test_resolve_rollover_works_when_other_digit_is_none():
-    # A None in a non-calibrated position must not block correction of calibrated ones.
-    state = _rollover_state(297.5, [10.0, 20.0, None, None])
-    result = mr.resolve_rollover([None, 0, 2, 9, 7], [15.0, 0.0, 0.0, 0.0], state)
-    assert result[4] == 8  # units corrected despite None in ten-thousands
+    # Apply to environment and reload the module
+    env_backup = {k: os.environ.get(k) for k in dist_vars}
+    for k, v in dist_vars.items():
+        os.environ[k] = v
+    try:
+        import importlib
+        importlib.reload(mr)
+    except Exception as e:
+        pytest.fail(f"Module failed to initialise with .env.dist values: {e}")
+    finally:
+        for k, v in env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        importlib.reload(mr)  # restore to conftest values
 
 
 # ── load_state / save_state ───────────────────────────────────────────────────
 
 def test_save_and_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(mr, "STATE_FILE", tmp_path / "state.json")
-    state = {"last_reading": 123.456, "dial_zero_offsets": [1.0, 2.0, None, None]}
+    state = {"last_reading": 123.456, "last_reading_ts": 1234567890.0}
     mr.save_state(state)
     loaded = mr.load_state()
     assert loaded["last_reading"] == pytest.approx(123.456)
-    assert loaded["dial_zero_offsets"] == [1.0, 2.0, None, None]
-
+    assert loaded["last_reading_ts"] == pytest.approx(1234567890.0)
 
 def test_load_state_missing_file(tmp_path, monkeypatch):
     monkeypatch.setattr(mr, "STATE_FILE", tmp_path / "nonexistent.json")
-    monkeypatch.setattr(mr, "INITIAL_VALUE", None)
     assert mr.load_state() == {}
-
-
-def test_load_state_uses_initial_value(tmp_path, monkeypatch):
-    monkeypatch.setattr(mr, "STATE_FILE", tmp_path / "nonexistent.json")
-    monkeypatch.setattr(mr, "INITIAL_VALUE", 297.1234)
-    state = mr.load_state()
-    assert state["last_reading"] == pytest.approx(297.1234)
-
-
-# ── _apply_rollover_bridge ────────────────────────────────────────────────────
-
-def test_rollover_bridge_analog_wrapped():
-    # OCR still shows old integer, frac just wrapped to near 0 → bridge to N+1
-    state = {"last_reading": 303.9800}
-    assert mr._apply_rollover_bridge(303.0100, state) == pytest.approx(304.0100)
-
-
-def test_rollover_bridge_ocr_ahead():
-    # OCR jumped to 304, corrected frac still near 1 → keep old integer 303
-    state = {"last_reading": 303.9763}
-    assert mr._apply_rollover_bridge(304.9891, state) == pytest.approx(303.9891)
-
-
-def test_rollover_bridge_ocr_ahead_exits_when_frac_crosses():
-    # Once corrected frac drops below threshold (meter past transition window) → no bridge
-    state = {"last_reading": 303.9891}
-    assert mr._apply_rollover_bridge(304.0200, state) == pytest.approx(304.0200)
-
-
-def test_rollover_bridge_no_fire_mid_reading():
-    state = {"last_reading": 303.5000}
-    assert mr._apply_rollover_bridge(303.5200, state) == pytest.approx(303.5200)
-
-
-def test_rollover_bridge_no_state():
-    assert mr._apply_rollover_bridge(303.9891, {}) == pytest.approx(303.9891)

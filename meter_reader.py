@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """
-meter_reader.py — standalone water meter reader, replacing nohn/watermeter.
+meter_reader.py — water meter reader.
 
 Pipeline:
-  1. Fetch /raw from overlay-proxy (undistorted, unrotated)
-  2. Rotate 244.6°
-  3. OCR the 4 digital digit crops (Tesseract)
-  4. Detect 4 analog dial angles (spoke sampling, copied from overlay-proxy)
-  5. Apply inter-dial gear-lash correction
-  6. Assemble reading and apply sanity guards
-  7. Output reading to stdout
+  1. Fetch image from camera (or load from file)
+  2. Rotate by configured degrees
+  3. OCR the 5 digital digit crops (Tesseract)
+  4. Detect 4 analog dial angles (spoke sampling)
+  5. Apply dial influence correction (boundary disambiguation via gear cascade)
+  6. Apply rollover coverage (override OCR during digit drum transition)
+  7. Assemble reading from corrected digits
+  8. Validate against previous reading
+  9. Push to Home Assistant
 
 Usage:
-  python3 meter_reader.py                   # live from proxy
-  python3 meter_reader.py --image foo.jpg   # offline against stored snapshot
-  python3 meter_reader.py --debug           # save annotated debug_reading.jpg
-  python3 meter_reader.py --no-guard        # skip threshold / decrease check
+  python3 meter_reader.py                         # live from camera
+  python3 meter_reader.py --image foo.jpg         # offline against stored snapshot
+  python3 meter_reader.py --debug                 # save annotated debug_reading.jpg
+  python3 meter_reader.py --no-guard              # skip validation guards
+  python3 meter_reader.py --loop                  # run continuously (pushes to HA)
+  python3 meter_reader.py --loop --interval 30    # override interval (seconds)
+  python3 meter_reader.py --last-reading 307.2500 # force last_reading baseline (once, no --loop)
+  python3 meter_reader.py --push                  # one-off run that also pushes to HA
 """
 
 import argparse
@@ -33,84 +39,69 @@ import pytesseract
 import requests
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-CAM_SNAPSHOT_URL = os.environ.get("CAM_SNAPSHOT_URL", "http://192.168.x.x/")
-HA_URL           = os.environ.get("HA_URL", "")
-HA_TOKEN         = os.environ.get("HA_TOKEN", "")
-READING_INTERVAL = float(os.environ.get("READING_INTERVAL", "10"))
-ROTATE_DEG    = 62.5
+# All values are read from environment variables. Missing required variables
+# cause an explicit failure at startup. See .env.dist for all variables and
+# their reference defaults.
 
-# Digital digit crop boxes in rotated-image coordinates.
-# Each entry: (x, y, w, h) — ordered most-significant to least-significant.
-# Recalibrated 2026-06-22 (camera shifted on node move mars→saturn).
-DIGITAL_DIGITS = [
-    (654, 911, 48, 50),
-    (702, 911, 48, 50),
-    (750, 911, 48, 50),
-    (798, 911, 48, 50),
-    (846, 911, 48, 50),
-]
+def _env(name: str) -> str:
+    val = os.environ.get(name)
+    if val is None:
+        raise RuntimeError(
+            f"Required environment variable {name!r} is not set (see .env.dist)")
+    return val
 
-# Full strip covering all digital digits; used by the strip OCR path.
-_DIGITAL_STRIP = (654, 911, 244, 50)
 
-# Analog dial offsets from strip centre: (dx, dy, r, dark_needle, flip)
-# Ordered most-significant → least-significant.
-# Recalibrated 2026-06-22 (camera shifted on node move mars→saturn).
-_ANALOG_DIAL_OFFSETS = [
-    (+262, +131, 61, False, False),  # ×0.1 m³
-    (+199, +280, 61, False, False),  # ×0.01 m³
-    ( +50, +335, 61, False, False),  # ×0.001 m³
-    (-100, +267, 65, False, False),  # ×0.0001 m³
-]
+def _parse_floats(s: str) -> list[float]:
+    return [float(x.strip()) for x in s.split(',')]
 
-def _make_analog_dials():
-    sx, sy, sw, sh = _DIGITAL_STRIP
-    cx, cy = sx + sw // 2, sy + sh // 2
-    return [(cx + dx, cy + dy, r, dk, fl) for dx, dy, r, dk, fl in _ANALOG_DIAL_OFFSETS]
 
-ANALOG_DIALS = _make_analog_dials()
+def _parse_crop(s: str) -> tuple[int, int, int, int]:
+    x, y, w, h = (int(v.strip()) for v in s.split(','))
+    return x, y, w, h
 
-# Mechanical phase correction for analog dials.
-# Empirically derived from the 299→300 rollover: raw_frac at the moment OCR
-# first cleanly reads the new integer was 0.3705.  Setting the correction to
-# -0.3705 maps that exact moment to corrected_frac=0.0000 (integer boundary),
-# giving a seamless ≤0.0001 m³ delta at rollover.  For single-digit rollovers
-# (where OCR detects later, at higher raw_frac) the rollover bridge fires at
-# this same wrap point and achieves the same seamless transition.
-# e.g. raw 0.7491 - 0.3705 = 0.3786
-DIAL_PHASE_CORRECTION = -0.3705
 
-# Rollover bridge threshold.  When the corrected fractional wraps from ~1 to
-# ~0 (analog crossed the integer boundary) but the digital OCR still shows
-# the old integer, the bridge infers integer+1.  Fires when corrected_frac is
-# within this band of 0, and the previous reading's fractional was within this
-# band of 1.
-ROLLOVER_BRIDGE_THRESHOLD = 0.15
+def _parse_crop_list(s: str) -> list[tuple[int, int, int, int]]:
+    return [_parse_crop(rec) for rec in s.split(';')]
 
-# Gear-lash correction thresholds.
-# LASH_HIGH: more-significant dial frac above this → approaching next digit, snap up.
-# LASH_LOW:  more-significant dial frac below this → just crossed digit boundary, snap up.
-# LASH_EXT_DEG: pass-1 trigger window — how many degrees past 0° the less-significant
-# dial may be while still considered "just completed a revolution". Covers digit 0
-# (36°) plus buffer for fast-flow frames where the dial advances significantly between
-# snapshots before gear lash resolves mechanically.
-# LASH_NEAR_ZERO: frac in digit 9 at which the dial is treated as effectively 0.
-LASH_HIGH      = 0.60
-LASH_LOW       = 0.20
-LASH_EXT_DEG   = 120.0  # ~3.3 digits past 0° crossing
-LASH_NEAR_ZERO = 0.90
 
-MAX_STEP       = float(os.environ.get("MAX_STEP", 0.05))  # m³ per sample
-ALLOW_DECREASE = False
-# Analog dial noise floor: dials settling after flow stops can read up to this
-# much lower than the flow-peak.  Decreases within this band are accepted
-# (flow reported as zero); larger decreases are still rejected as likely errors.
-JITTER_TOLERANCE = float(os.environ.get("JITTER_TOLERANCE", 0.010))  # m³
+def _parse_dial_list(s: str) -> list[tuple[int, int, int]]:
+    result = []
+    for rec in s.split(';'):
+        parts = [p.strip() for p in rec.split(',')]
+        result.append((int(parts[0]), int(parts[1]), int(parts[2])))
+    return result
 
-STATE_FILE    = Path(os.environ.get("STATE_FILE",
-                    str(Path(__file__).parent / ".meter_state.json")))
-INITIAL_VALUE = float(os.environ["INITIAL_VALUE"]) if "INITIAL_VALUE" in os.environ else None
-FLOW_MAX_AGE  = float(os.environ["FLOW_MAX_AGE"]) if "FLOW_MAX_AGE" in os.environ else None  # seconds
+
+# Integration (site-specific; no defaults)
+CAM_SNAPSHOT_URL = _env("CAM_SNAPSHOT_URL")
+HA_URL           = _env("HA_URL")
+HA_TOKEN         = _env("HA_TOKEN")
+
+# Camera / image geometry (camera-specific calibration)
+ROTATE_DEG     = float(_env("ROTATE_DEG"))
+DIGITAL_STRIP = _parse_crop(_env("DIGITAL_STRIP"))
+DIGITAL_DIGITS = _parse_crop_list(_env("DIGITAL_DIGITS"))
+ANALOG_DIALS   = _parse_dial_list(_env("ANALOG_DIALS"))
+
+# Dial calibration — physical zero offsets (degrees), order A0..A3
+DIAL_ZERO_OFFSETS = _parse_floats(_env("DIAL_ZERO_OFFSETS"))
+
+# Dial influence thresholds (fraction 0.0–1.0)
+DIAL_INFLUENCE_HIGH = float(_env("DIAL_INFLUENCE_HIGH"))
+DIAL_INFLUENCE_LOW  = float(_env("DIAL_INFLUENCE_LOW"))
+
+# Rollover: corrected_fraction >= ROLLOVER_START means digit drum is transitioning
+ROLLOVER_START = float(_env("ROLLOVER_START"))
+
+# Rate safeguards
+READING_INTERVAL = float(_env("READING_INTERVAL"))
+MAX_STEP         = float(_env("MAX_STEP"))
+MAX_DELTA_CAP    = float(_env("MAX_DELTA_CAP"))
+JITTER_TOLERANCE = float(_env("JITTER_TOLERANCE"))
+
+# State
+STATE_FILE   = Path(_env("STATE_FILE"))
+FLOW_MAX_AGE = float(os.environ["FLOW_MAX_AGE"]) if "FLOW_MAX_AGE" in os.environ else None
 
 log = logging.getLogger(__name__)
 
@@ -134,19 +125,13 @@ def rotate_image(img: np.ndarray, deg: float) -> np.ndarray:
 
 # ── Digital OCR ────────────────────────────────────────────────────────────────
 def _ocr_single_digit(crop: np.ndarray) -> int | None:
-    """
-    Return int 0–9 from a digit crop, or None on failure.
-    Tries both normal and inverted threshold; picks the highest-confidence result.
-    """
+    """Return int 0–9 from a digit crop, or None on failure."""
     crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     gray = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-
     cfg = r"--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789"
-
     for invert in (False, True):
         src = 255 - gray if invert else gray
         _, thresh = cv2.threshold(src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Pad so Tesseract doesn't clip characters at the edge
         thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
                                     cv2.BORDER_CONSTANT, value=255)
         data = pytesseract.image_to_data(
@@ -155,21 +140,13 @@ def _ocr_single_digit(crop: np.ndarray) -> int | None:
             text = text.strip()
             if text.isdigit():
                 return int(text)
-
     return None
 
 
 def read_digital_digits(img: np.ndarray,
                         last_int: int | None = None) -> list[int | None]:
-    """Return list of 5 ints (or None per failed digit) from the digital counter.
-
-    Primary path: reads the full digit strip as one unit with PSM 8 — more
-    reliable than per-digit PSM 10 for this meter's font.  Falls back to
-    per-digit OCR if the strip result doesn't yield exactly 5 digits, or if
-    the zfilled result is implausibly far from last_int (e.g. Tesseract dropped
-    a leading zero AND misread another — "00297" → "9297" → zfill "09297").
-    """
-    sx, sy, sw, sh = _DIGITAL_STRIP
+    """Return list of 5 ints (or None per failed digit) from the digital counter."""
+    sx, sy, sw, sh = DIGITAL_STRIP
     strip = img[sy:sy + sh, sx:sx + sw]
     strip3x = cv2.resize(strip, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     gray = cv2.GaussianBlur(cv2.cvtColor(strip3x, cv2.COLOR_BGR2GRAY), (3, 3), 0)
@@ -180,14 +157,8 @@ def read_digital_digits(img: np.ndarray,
     for psm in (7, 6, 8):
         cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
         result = "".join(pytesseract.image_to_string(thresh, config=cfg).split())
-        # Accept up to 2 missing leading zeros — the counter left-pads them and
-        # Tesseract often drops them from the strip; zfill restores them.
-        # Internal spaces are removed above so "0 2 5" → "025" before the check.
         if result.isdigit() and n - 2 <= len(result) <= n:
             digits = [int(c) for c in result.zfill(n)]
-            # With MAX_STEP=0.05 m³ the integer can only advance by 0 or 1 per
-            # sample, so a threshold of 2 is generous while blocking misreads
-            # like 8→3 (diff=5) slipping through as a plausible strip result.
             assembled_int = int("".join(str(d) for d in digits))
             if last_int is None or 0 <= assembled_int - last_int <= 1:
                 return digits
@@ -205,344 +176,177 @@ def read_digital_digits(img: np.ndarray,
                 digits[i] = last_digs[i]
                 log.debug("digit[%d] OCR failed — using last known %d", i, last_digs[i])
             elif d != last_digs[i] and d != rollover:
-                log.debug("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last known",
+                log.debug("digit[%d] OCR=%d implausible (last=%d, rollover=%d) — using last",
                           i, d, last_digs[i], rollover)
                 digits[i] = last_digs[i]
-        # Guard against compound spurious increments: each digit passes the
-        # per-digit rollover check in isolation but the assembled integer may
-        # still be far from last_int (e.g. tens "0"→"1" + units "4"→"5" both
-        # look like valid rollovers but produce +11 m³). Reject anything more
-        # than ±1 m³ away; revert to last known integer.
         assembled = int("".join(str(d) for d in digits))
         if not (0 <= assembled - last_int <= 1):
-            log.info("per-digit assembled %d implausible vs last=%d — reverting to last known",
+            log.info("per-digit assembled %d implausible vs last=%d — reverting",
                      assembled, last_int)
             digits = list(last_digs)
     return digits
 
 
 # ── Analog dial detection ──────────────────────────────────────────────────────
-def detect_needle_angle(img_bgr: np.ndarray, cx: int, cy: int, r: int,
-                        dark_needle: bool = False) -> float | None:
-    """
-    Spoke-sampled needle angle (0° = 12-o'clock, clockwise).
-    Returns degrees 0–359 or None if no clear needle found.
-    """
+def detect_needle_angle(img_bgr: np.ndarray, cx: int, cy: int, r: int) -> float | None:
+    """Spoke-sampled needle angle (0° = 12-o'clock, clockwise). Returns 0–359 or None."""
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-
-    if dark_needle:
-        gray    = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY).astype(float)
-        signal  = np.clip(110 - gray, 0, 255)
-        r_outer = r * 0.85
-    else:
-        red_mask = cv2.bitwise_or(
-            cv2.inRange(hsv, np.array([0,   50, 30]), np.array([20, 255, 255])),
-            cv2.inRange(hsv, np.array([155, 50, 30]), np.array([180, 255, 255])),
-        )
-        signal  = np.where(red_mask > 0, hsv[:, :, 1].astype(float), 0.0)
-        r_outer = float(r)
-
+    red_mask = cv2.bitwise_or(
+        cv2.inRange(hsv, np.array([0,   50, 30]), np.array([20, 255, 255])),
+        cv2.inRange(hsv, np.array([155, 50, 30]), np.array([180, 255, 255])),
+    )
+    signal  = np.where(red_mask > 0, hsv[:, :, 1].astype(float), 0.0)
+    r_outer = float(r)
     hub_r  = r * 0.22
     n_samp = 48
-
     angles_rad = np.radians(np.arange(360))
     t_vals     = hub_r + (r_outer - hub_r) * np.arange(n_samp) / n_samp
     H, W       = img_bgr.shape[:2]
     px = np.clip((cx + np.outer(np.sin(angles_rad), t_vals)).astype(int), 0, W - 1)
     py = np.clip((cy - np.outer(np.cos(angles_rad), t_vals)).astype(int), 0, H - 1)
-
     scores = (signal[py, px] * t_vals).sum(axis=1)
     if scores.max() < 200:
         return None
-
     k      = np.ones(9) / 9
     scores = np.convolve(np.tile(scores, 3), k, mode="same")[360:720]
     return float(np.argmax(scores))
 
 
 def read_analog_dials(img: np.ndarray) -> list[float | None]:
-    """Return list of 4 raw angles (degrees) — most→least significant."""
-    angles = []
-    for cx, cy, r, dark, flip in ANALOG_DIALS:
-        angle = detect_needle_angle(img, cx, cy, r, dark_needle=dark)
-        if angle is not None and flip:
-            angle = (angle + 180) % 360
-        angles.append(angle)
-    return angles
+    """Return list of 4 raw angles (degrees) — A0..A3, most→least significant."""
+    return [detect_needle_angle(img, cx, cy, r) for cx, cy, r in ANALOG_DIALS]
 
 
-# ── Inter-dial gear-lash correction ───────────────────────────────────────────
-def correct_gear_lash(angles: list[float | None]) -> list[float | None]:
+# ── Corrected angle primitives ─────────────────────────────────────────────────
+
+def corrected_angle(raw: float, zero_offset: float) -> float:
+    """Raw angle adjusted to the dial's calibrated zero position."""
+    return (raw - zero_offset) % 360.0
+
+
+def corrected_digit(corr: float) -> int:
+    """Integer digit 0–9 from a corrected angle."""
+    return int(corr / 36.0) % 10
+
+
+# ── Dial influence correction ──────────────────────────────────────────────────
+
+def dial_influenced_digit(n: int, raw_angles: list[float | None]) -> int:
     """
-    Two-pass bottom-up gear-lash correction.
+    Digit for dial n, with boundary ambiguity resolved using dial n+1.
 
-    Pass 1 (normal): when less-significant dial is at digit 0, the more-significant
-    dial may lag behind due to mechanical gear lash — snap it up if in the LASH zone.
+    Reads as (k+1) % 10 only when BOTH:
+      sub_frac(n)          > DIAL_INFLUENCE_HIGH  — n is near its upper boundary
+      corrected(n+1) / 360 < DIAL_INFLUENCE_LOW   — n+1 just passed 0 (just drove n)
 
-    Pass 2 (near-zero): when less-significant dial is at digit 9 with frac >=
-    LASH_NEAR_ZERO (essentially completed its revolution but detection noise keeps
-    it just below 0°), snap it to 0° and apply the same gear-lash correction.
+    Reads as (k-1) % 10 only when BOTH:
+      sub_frac(n)          < DIAL_INFLUENCE_LOW   — n just crossed a boundary
+      corrected(n+1) / 360 > DIAL_INFLUENCE_HIGH  — n+1 hasn't completed its revolution
     """
-    result = list(angles)
+    raw = raw_angles[n]
+    if raw is None:
+        return 0
 
-    # Pass 1 — normal digit-0 trigger.
-    # Trigger is checked against the ORIGINAL angles so that snapping a less-
-    # significant dial in one iteration does not suppress the trigger for a
-    # more-significant dial that also needs correction.
-    for i in range(len(result) - 2, -1, -1):
-        if angles[i] is None or angles[i + 1] is None:
-            continue
-        frac_next  = (angles[i + 1] / 36.0) % 1.0
-        frac_cur   = (result[i]     / 36.0) % 1.0
-        # Trigger: next dial is within LASH_EXT_DEG of the 0° crossing.
-        # This covers all of digit 0 plus a buffer into digit 1/2 where gear
-        # lash may still be unresolved (fast flow = next dial advances far
-        # between snapshots before lash resolves mechanically).
-        # Exception: if the current dial is a near-zero digit 9, pass 2 owns
-        # it — pass 2 does the full cascade snap including the parent dial.
-        cur_digit      = int(result[i]      / 36.0) % 10
-        pass2_owns     = (cur_digit == 9 and frac_cur >= LASH_NEAR_ZERO)
-        angle_next_mod = angles[i + 1] % 360.0
-        if not (angle_next_mod < LASH_EXT_DEG and not pass2_owns):
-            continue
-        # LASH_LOW only applies in the core digit-0 zone: in the extended buffer
-        # (next dial past 36°) low frac is legitimate — the current dial may
-        # have just recently crossed its own boundary.
-        in_core_zone = angle_next_mod < 36.0
-        if frac_cur > LASH_HIGH or (in_core_zone and frac_cur < LASH_LOW):
-            snapped = (int(result[i] / 36.0) + 1) % 10
-            old     = result[i]
-            result[i] = float(snapped * 36)
-            log.debug("gear-lash: dial %d %.1f°(frac %.2f) → digit %d  "
-                      "[dial %d at %.1f°, %.0f° past 0]",
-                      i + 1, old, frac_cur, snapped, i + 2,
-                      angles[i + 1], angle_next_mod)
+    corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[n])
+    pos  = corr / 36.0
+    k    = int(pos) % 10
+    sub  = pos % 1.0
 
-    # Pass 2 — near-zero snap: treat digit 9 at frac >= LASH_NEAR_ZERO as digit 0
-    for i in range(len(result) - 2, -1, -1):
-        if result[i] is None or result[i + 1] is None:
-            continue
-        pos_next   = result[i + 1] / 36.0
-        digit_next = int(pos_next) % 10
-        frac_next  = pos_next % 1.0
-        if digit_next != 9 or frac_next < LASH_NEAR_ZERO:
-            continue
-        old_next      = result[i + 1]
-        result[i + 1] = 0.0          # snap less-significant dial to 0°
-        frac_cur      = (result[i] / 36.0) % 1.0
-        if frac_cur > LASH_HIGH or frac_cur < LASH_LOW:
-            snapped    = (int(result[i] / 36.0) + 1) % 10
-            old        = result[i]
-            result[i]  = float(snapped * 36)
-            log.debug("gear-lash near-zero: dial %d %.1f°(frac %.2f) → digit %d  "
-                      "[dial %d %.1f°→0°]",
-                      i + 1, old, frac_cur, snapped, i + 2, old_next)
-        else:
-            log.debug("gear-lash near-zero: dial %d snapped to 0°  "
-                      "[dial %d frac %.2f not in lash zone]",
-                      i + 2, old_next, i + 1, frac_cur)
+    if n + 1 >= len(raw_angles) or raw_angles[n + 1] is None:
+        return k
 
-    return result
+    driver_corr = corrected_angle(raw_angles[n + 1], DIAL_ZERO_OFFSETS[n + 1])
+    driver_sub  = driver_corr / 360.0
+
+    if sub > DIAL_INFLUENCE_HIGH and driver_sub < DIAL_INFLUENCE_LOW:
+        return (k + 1) % 10
+    if sub < DIAL_INFLUENCE_LOW and driver_sub > DIAL_INFLUENCE_HIGH:
+        return (k - 1 + 10) % 10
+    return k
 
 
 # ── Reading assembly ───────────────────────────────────────────────────────────
-def angle_to_digit(angle: float) -> int:
-    return int(angle / 36.0) % 10
-
 
 def assemble_reading(digital: list[int | None],
-                     analog_angles: list[float | None]) -> float:
+                     raw_angles: list[float | None]) -> float:
     if any(d is None for d in digital):
         raise ValueError(f"OCR failure — digital digits: {digital}")
-    if any(a is None for a in analog_angles):
-        raise ValueError(f"Needle detection failure — angles: {analog_angles}")
+    if any(a is None for a in raw_angles):
+        raise ValueError(f"Needle detection failure — angles: {raw_angles}")
 
-    integer_part = int("".join(str(d) for d in digital))
-
-    def _round_last(a: float) -> int:
-        d = int(a / 36.0) % 10
-        return d if d == 9 or (a / 36.0) % 1.0 < 0.5 else (d + 1) % 10
-
-    def _round_intermediate(a_parent: float, a_child: float) -> int:
-        # Round-to-nearest only when within ~4.5° of the next-digit boundary
-        # (frac >= 7/8). The child's absolute angle cannot confirm the parent's
-        # fractional position without a meter-specific phase-offset calibration,
-        # so only the parent frac is used; the child angle is reserved for the
-        # gear-lash correction pass that runs before this function.
-        pos  = a_parent / 36.0
-        d    = int(pos) % 10
-        frac = pos % 1.0
-        if d == 9 or frac < 0.875:
-            return d
-        return (d + 1) % 10
-
-    analog_digits = []
-    for i, a in enumerate(analog_angles):
-        if i < len(analog_angles) - 1:
-            analog_digits.append(_round_intermediate(a, analog_angles[i + 1]))
-        else:
-            analog_digits.append(_round_last(a))
-    fractional = sum(d * 10 ** -(i + 1) for i, d in enumerate(analog_digits))
-    fractional = round(fractional + DIAL_PHASE_CORRECTION, 4) % 1.0
+    integer_part  = int("".join(str(d) for d in digital))
+    analog_digits = [dial_influenced_digit(i, raw_angles) for i in range(len(raw_angles))]
+    fractional    = sum(d * 10 ** -(i + 1) for i, d in enumerate(analog_digits))
     return round(integer_part + fractional, 4)
 
 
-# ── Rollover calibration and disambiguation ────────────────────────────────────
-#
-# At every integer-digit rollover (N→N+1 m³), all four analog dials return to
-# their mechanical zero simultaneously.  Recording each dial's raw angle at that
-# moment gives its zero offset.  Accuracy degrades for faster dials because the
-# 19-minute drum-transition window lets them advance:
-#   A0 (×0.1)  : ~0.4° error  → reliable
-#   A1 (×0.01) : ~3.6° error  → usable
-#   A2 (×0.001): ~36°  error  → poor, skip
-#   A3 (×0.0001): ~360° error → skip entirely
-#
-# Once A0 and A1 are calibrated, they resolve OCR ambiguity during the slow
-# mechanical transition of the units (pos4) and tens (pos3) digits respectively.
+# ── Rollover coverage ──────────────────────────────────────────────────────────
 
-# dial index → digital position it drives
-_DIAL_DRIVES_POS = {0: 4, 1: 3, 2: 2, 3: 1}
-# digital position → dial index that drives it
-_POS_DRIVEN_BY_DIAL = {v: k for k, v in _DIAL_DRIVES_POS.items()}
-# Dials reliable enough to calibrate and use for disambiguation
-_CALIBRATE_DIALS = (0, 1)
-
-# Fraction of a revolution within which we declare "just crossed zero" or
-# "about to cross zero" for rollover disambiguation.
-_ROLLOVER_BAND = 0.15
-
-
-def _dial_fraction(raw_angle: float | None, zero_offset: float | None) -> float | None:
-    """Fractional position 0.0–1.0 relative to calibrated zero. None if uncalibrated."""
-    if raw_angle is None or zero_offset is None:
+def corrected_fraction(raw_angles: list[float | None]) -> float | None:
+    """Fractional reading derived from corrected dial digits (0.0–1.0)."""
+    if any(a is None for a in raw_angles):
         return None
-    return ((raw_angle - zero_offset) % 360) / 360.0
+    total = sum(
+        corrected_digit(corrected_angle(raw, DIAL_ZERO_OFFSETS[i])) * 10 ** -(i + 1)
+        for i, raw in enumerate(raw_angles)
+    )
+    return round(total, 4)
 
 
-def calibrate_from_rollover(digital: list[int | None],
-                            angles: list[float | None],
-                            state: dict) -> dict:
+def rollover_coverage(digital: list[int | None],
+                      raw_angles: list[float | None],
+                      state: dict) -> list[int | None]:
     """
-    Called after a reading is accepted. If the integer part incremented by 1,
-    record dial angles as zero offsets.  Returns updated state (not yet saved).
+    Override OCR digits during digit drum transitions.
+
+    Rollover in progress:  corrected_fraction >= ROLLOVER_START
+    Rollover just complete: fraction wrapped from >= ROLLOVER_START to below it
+
+    D4 always transitions; cascade to D3, D2, ... for each digit that was 9
+    in the last accepted reading (e.g. 299→300 triggers D4+D3+D2).
+
+    During transition → force to 9.  After transition → force to 0.
     """
-    last = state.get("last_reading")
-    if last is None or any(d is None for d in digital):
-        return state
+    frac = corrected_fraction(raw_angles)
+    if frac is None:
+        return digital
 
-    last_int = int(last)
-    new_int  = int("".join(str(d) for d in digital))
-
-    if new_int != last_int + 1:
-        return state
-
-    # The first clean new-digit frame is captured when the digit drum has just
-    # become readable but may not yet be fully settled.  The mechanical carry
-    # completes one dial graduation (36°) later — at the face "1" position rather
-    # than face "0".  Apply a fixed +36° phase correction to align the stored
-    # zero with the true mechanical completion point.
-    _CARRY_PHASE_DEG = 36.0
-
-    offsets = state.setdefault("dial_zero_offsets", [None] * 4)
-    for dial_idx in _CALIBRATE_DIALS:
-        if dial_idx < len(angles) and angles[dial_idx] is not None:
-            corrected = (angles[dial_idx] + _CARRY_PHASE_DEG) % 360
-            offsets[dial_idx] = corrected
-            log.info("dial calibration: A%d (×%s) zero=%.1f°  (%d→%d rollover, +%.0f° phase)",
-                     dial_idx, ["0.1", "0.01", "0.001", "0.0001"][dial_idx],
-                     corrected, last_int, new_int, _CARRY_PHASE_DEG)
-
-    return state
-
-
-def resolve_rollover(digital: list[int | None],
-                     angles: list[float | None],
-                     state: dict) -> list[int | None]:
-    """
-    Use the calibrated dial fraction to correct digits that OCR got wrong during
-    a mechanical drum transition.  Operates on any OCR value (including None and
-    garbled reads such as 9 during a 7→8 transition) whenever the dial fraction
-    is inside the rollover band:
-      fraction < _ROLLOVER_BAND  → dial just crossed zero → force expected_new
-      fraction > 1-_ROLLOVER_BAND → dial about to cross zero → force expected_old
-    Outside the rollover band the digit is left as-is.
-    """
     last = state.get("last_reading")
     if last is None:
         return digital
 
-    offsets   = state.get("dial_zero_offsets", [None] * 4)
+    last_frac = round(last % 1.0, 4)
     last_digs = [int(c) for c in f"{int(last):05d}"]
     result    = list(digital)
 
-    for pos, dial_idx in _POS_DRIVEN_BY_DIAL.items():
-        if dial_idx not in _CALIBRATE_DIALS:
-            continue
+    # pos transitions if ALL less-significant positions (pos+1..4) held 9,
+    # causing them to carry and increment this position.
+    transitioning = [4]
+    for pos in (3, 2, 1, 0):
+        if all(last_digs[p] == 9 for p in range(pos + 1, 5)):
+            transitioning.append(pos)
+        else:
+            break
 
-        frac = _dial_fraction(
-            angles[dial_idx] if dial_idx < len(angles) else None,
-            offsets[dial_idx])
-        if frac is None:
-            continue
-
-        d            = result[pos]
-        expected_old = last_digs[pos]
-        expected_new = (expected_old + 1) % 10
-
-        if frac < _ROLLOVER_BAND and d != expected_new:
-            result[pos] = expected_new
-            log.debug("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, past zero)",
-                      pos, d, expected_new, dial_idx, frac)
-        elif frac > 1 - _ROLLOVER_BAND and d != expected_old:
-            result[pos] = expected_old
-            log.debug("rollover assist: pos%d OCR=%s → %d  (A%d frac=%.3f, before zero)",
-                      pos, d, expected_old, dial_idx, frac)
+    if frac >= ROLLOVER_START:
+        for pos in transitioning:
+            result[pos] = last_digs[pos]
+        log.debug("rollover: in progress frac=%.4f, forcing %s → old", frac, transitioning)
+    elif last_frac >= ROLLOVER_START:
+        for pos in transitioning:
+            result[pos] = (last_digs[pos] + 1) % 10
+        log.debug("rollover: complete frac=%.4f (was %.4f), forcing %s → new",
+                  frac, last_frac, transitioning)
 
     return result
 
 
-# ── Rollover bridge ────────────────────────────────────────────────────────────
-def _apply_rollover_bridge(reading: float, state: dict) -> float:
-    """
-    Correct the assembled reading at integer-rollover boundaries.
+# ── State management ───────────────────────────────────────────────────────────
 
-    Case 1 — analog-ahead: corrected frac just wrapped to near-zero while OCR
-    still shows the old integer → infer integer+1.
-
-    Case 2 — ocr-ahead: OCR jumped to the new integer while corrected frac is
-    still near 1 (meter is in the DIAL_PHASE_CORRECTION transition window,
-    raw_frac ∈ [0, DIAL_PHASE_CORRECTION)) → keep old integer until dials cross.
-    """
-    if not state or "last_reading" not in state:
-        return reading
-    last = state["last_reading"]
-    frac = reading % 1.0
-    last_frac = last % 1.0
-    if (int(reading) == int(last) and
-            frac < ROLLOVER_BRIDGE_THRESHOLD and
-            last_frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
-        old_int = int(reading)
-        reading = round(old_int + 1 + frac, 4)
-        log.debug("rollover bridge: analog wrapped, integer %d→%d  frac=%.4f",
-                  old_int, old_int + 1, frac)
-    elif (int(reading) == int(last) + 1 and
-            frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD and
-            last_frac > 1.0 - ROLLOVER_BRIDGE_THRESHOLD):
-        old_int = int(last)
-        reading = round(old_int + frac, 4)
-        log.debug("rollover bridge (ocr-ahead): ocr integer %d→%d  frac=%.4f",
-                  old_int + 1, old_int, frac)
-    return reading
-
-
-# ── Sanity guards ──────────────────────────────────────────────────────────────
 def load_state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text())
     except Exception:
-        if INITIAL_VALUE is not None:
-            return {"last_reading": INITIAL_VALUE}
         return {}
 
 
@@ -550,22 +354,35 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 
+# ── Validation ─────────────────────────────────────────────────────────────────
+
 def validate(new_val: float, state: dict) -> tuple[bool, str]:
     last = state.get("last_reading")
     if last is None:
         return True, "first reading"
+
+    last_ts = state.get("last_reading_ts")
+    if last_ts is not None:
+        elapsed = time.time() - last_ts
+        allowed = min(MAX_STEP * max(elapsed, READING_INTERVAL) / READING_INTERVAL,
+                      MAX_DELTA_CAP)
+    else:
+        allowed = MAX_STEP
+
     delta = new_val - last
-    if abs(delta) > MAX_STEP:
-        return False, f"jump {delta:+.4f} exceeds MAX_STEP {MAX_STEP} ({last:.4f} → {new_val:.4f})"
-    if not ALLOW_DECREASE and delta < -JITTER_TOLERANCE:
-        return False, f"decrease not allowed ({last:.4f} → {new_val:.4f})"
+    if delta > allowed:
+        return False, (f"jump {delta:+.4f} exceeds allowed {allowed:.4f} "
+                       f"({last:.4f} → {new_val:.4f})")
+    if delta < -JITTER_TOLERANCE:
+        return False, (f"decrease {delta:+.4f} exceeds jitter tolerance "
+                       f"({last:.4f} → {new_val:.4f})")
     return True, "ok"
 
 
 # ── Debug annotation ───────────────────────────────────────────────────────────
+
 def annotate(img: np.ndarray, digital: list[int | None],
-             angles_raw: list[float | None],
-             angles_cor: list[float | None]) -> np.ndarray:
+             raw_angles: list[float | None]) -> np.ndarray:
     out = img.copy()
     for i, (x, y, w, h) in enumerate(DIGITAL_DIGITS):
         cv2.rectangle(out, (x, y), (x + w, y + h), (0, 220, 0), 2)
@@ -574,20 +391,22 @@ def annotate(img: np.ndarray, digital: list[int | None],
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2)
     for i, (cx, cy, r, _, _) in enumerate(ANALOG_DIALS):
         cv2.circle(out, (cx, cy), r, (255, 160, 0), 2)
-        for angle, color in ((angles_raw[i], (120, 120, 120)),
-                              (angles_cor[i], (0, 0, 255))):
+        raw  = raw_angles[i]
+        corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[i]) if raw is not None else None
+        for angle, color in ((raw, (120, 120, 120)), (corr, (0, 0, 255))):
             if angle is not None:
-                a = math.radians(angle)
+                a   = math.radians(angle)
                 tip = (int(cx + (r - 12) * math.sin(a)),
                        int(cy - (r - 12) * math.cos(a)))
                 cv2.line(out, (cx, cy), tip, color, 2)
-        d = angle_to_digit(angles_cor[i]) if angles_cor[i] is not None else "?"
+        d = corrected_digit(corr) if corr is not None else "?"
         cv2.putText(out, str(d), (cx - 8, cy + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
     return out
 
 
 # ── Home Assistant integration ─────────────────────────────────────────────────
+
 def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
     if not HA_URL or not HA_TOKEN:
         return
@@ -599,40 +418,28 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
         (
             "sensor.water_meter",
             f"{reading:.4f}",
-            {
-                "unit_of_measurement": "m³",
-                "device_class": "water",
-                "state_class": "total_increasing",
-                "friendly_name": "Water Meter",
-            },
+            {"unit_of_measurement": "m³", "device_class": "water",
+             "state_class": "total_increasing", "friendly_name": "Water Meter"},
         ),
         (
             "sensor.water_meter_liters",
             f"{reading * 1000:.1f}",
-            {
-                "unit_of_measurement": "L",
-                "device_class": "water",
-                "state_class": "total_increasing",
-                "friendly_name": "Water Meter (L)",
-            },
+            {"unit_of_measurement": "L", "device_class": "water",
+             "state_class": "total_increasing", "friendly_name": "Water Meter (L)"},
         ),
     ]
     if flow_lpm is not None:
         entities.append((
             "sensor.water_meter_flow",
             f"{flow_lpm:.3f}",
-            {
-                "unit_of_measurement": "L/min",
-                "device_class": "volume_flow_rate",
-                "state_class": "measurement",
-                "friendly_name": "Water Meter Flow",
-            },
+            {"unit_of_measurement": "L/min", "device_class": "volume_flow_rate",
+             "state_class": "measurement", "friendly_name": "Water Meter Flow"},
         ))
-    for entity_id, state, attrs in entities:
+    for entity_id, st, attrs in entities:
         try:
             resp = requests.post(
                 f"{HA_URL}/api/states/{entity_id}",
-                json={"state": state, "attributes": attrs},
+                json={"state": st, "attributes": attrs},
                 headers=headers,
                 timeout=10,
             )
@@ -642,37 +449,33 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
+
 def process(img: np.ndarray, debug: bool = False,
             state: dict | None = None) -> tuple[float, list, list]:
-    """
-    Returns (reading, digital, angles_cor).
-    Pass `state` to enable rollover disambiguation using calibrated dial zeros.
-    """
-    rotated  = rotate_image(img, ROTATE_DEG)
-    last_int = int(state["last_reading"]) if state and "last_reading" in state else None
-    digital  = read_digital_digits(rotated, last_int=last_int)
-    angles_raw = read_analog_dials(rotated)
-    angles_cor = correct_gear_lash(angles_raw)
+    """Returns (reading, digital, raw_angles)."""
+    rotated    = rotate_image(img, ROTATE_DEG)
+    last_int   = int(state["last_reading"]) if state and "last_reading" in state else None
+    digital    = read_digital_digits(rotated, last_int=last_int)
+    raw_angles = read_analog_dials(rotated)
 
     if state:
-        digital = resolve_rollover(digital, angles_cor, state)
+        digital = rollover_coverage(digital, raw_angles, state)
 
-    reading = assemble_reading(digital, angles_cor)
-
-    reading = _apply_rollover_bridge(reading, state)
+    reading = assemble_reading(digital, raw_angles)
 
     log.debug("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
               digital,
-              [f"{a:.1f}" if a is not None else "None" for a in angles_raw],
-              [angle_to_digit(a) if a is not None else "?" for a in angles_cor],
+              [f"{a:.1f}" if a is not None else "None" for a in raw_angles],
+              [corrected_digit(corrected_angle(a, DIAL_ZERO_OFFSETS[i]))
+               if a is not None else "?" for i, a in enumerate(raw_angles)],
               reading)
 
     if debug:
-        ann = annotate(rotated, digital, angles_raw, angles_cor)
+        ann = annotate(rotated, digital, raw_angles)
         cv2.imwrite("debug_reading.jpg", ann)
         log.debug("Annotated image saved to debug_reading.jpg")
 
-    return reading, digital, angles_cor
+    return reading, digital, raw_angles
 
 
 def _fetch_image(image_path: str | None) -> np.ndarray:
@@ -690,19 +493,24 @@ def _fetch_image(image_path: str | None) -> np.ndarray:
     return img
 
 
-def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | None:
-    """Fetch, process, validate, push. Returns accepted reading or None."""
+def _run_once(image_path: str | None, debug: bool, no_guard: bool,
+              last_reading: float | None = None, push: bool = False) -> float | None:
+    """Fetch, process, validate, and optionally push. Returns accepted reading or None."""
     state = load_state()
+    if last_reading is not None:
+        state["last_reading"] = last_reading
+        state.pop("last_reading_ts", None)
     try:
         img = _fetch_image(image_path)
-        reading, digital, angles_cor = process(img, debug=debug, state=state)
+        reading, digital, raw_angles = process(img, debug=debug, state=state)
     except (ValueError, RuntimeError, requests.exceptions.RequestException) as e:
         log.error("%s", e)
         return None
 
     if no_guard:
         print(f"{reading:.4f}")
-        push_to_ha(reading)
+        if push:
+            push_to_ha(reading)
         return reading
 
     ok, reason = validate(reading, state)
@@ -710,8 +518,8 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
         log.warning("Rejected: %s", reason)
         return None
 
-    now = time.time()
-    last_ts = state.get("last_reading_ts")
+    now      = time.time()
+    last_ts  = state.get("last_reading_ts")
     last_val = state.get("last_reading")
     flow_lpm = None
     if last_val is not None and last_ts is not None:
@@ -719,17 +527,18 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool) -> float | No
         if elapsed <= 0:
             log.warning("flow rate skipped: elapsed=%.3fs (clock went backwards?)", elapsed)
         elif FLOW_MAX_AGE is not None and elapsed > FLOW_MAX_AGE:
-            log.debug("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs", elapsed, FLOW_MAX_AGE)
+            log.debug("flow rate skipped: elapsed=%.1fs exceeds FLOW_MAX_AGE=%.1fs",
+                      elapsed, FLOW_MAX_AGE)
         else:
             flow_lpm = max(0.0, (reading - last_val) * 1000 / elapsed * 60)
 
-    state = calibrate_from_rollover(digital, angles_cor, state)
-    state["last_reading"] = reading
+    state["last_reading"]    = reading
     state["last_reading_ts"] = now
     save_state(state)
     flow_str = f"{flow_lpm:.3f} L/min" if flow_lpm is not None else "n/a"
     log.info("accepted reading=%.4f  flow=%s", reading, flow_str)
-    push_to_ha(reading, flow_lpm)
+    if push:
+        push_to_ha(reading, flow_lpm)
     return reading
 
 
@@ -738,17 +547,26 @@ def main() -> None:
     ap.add_argument("--image",    help="Load from file instead of live camera")
     ap.add_argument("--debug",    action="store_true", help="Write debug_reading.jpg")
     ap.add_argument("--no-guard", action="store_true", help="Skip sanity guards")
-    ap.add_argument("--loop",     action="store_true",
-                    help="Run continuously on a fixed interval (READING_INTERVAL env var)")
-    ap.add_argument("--interval", type=float, default=None,
-                    help="Override READING_INTERVAL (seconds, default 10)")
+    ap.add_argument("--loop",         action="store_true",
+                    help="Run continuously on READING_INTERVAL")
+    ap.add_argument("--interval",     type=float, default=None,
+                    help="Override READING_INTERVAL (seconds)")
+    ap.add_argument("--last-reading", type=float, default=None,
+                    help="Override last_reading baseline for this run (not allowed with --loop)")
+    ap.add_argument("--push",         action="store_true",
+                    help="Push result to HA even on a one-off run")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
+    if args.last_reading is not None and args.loop:
+        ap.error("--last-reading cannot be used with --loop")
+
+    push = args.loop or args.push
+
     if not args.loop:
-        result = _run_once(args.image, args.debug, args.no_guard)
+        result = _run_once(args.image, args.debug, args.no_guard, args.last_reading, push=push)
         sys.exit(0 if result is not None else 1)
 
     interval = args.interval if args.interval is not None else READING_INTERVAL
@@ -757,7 +575,7 @@ def main() -> None:
 
     while True:
         t0 = time.monotonic()
-        _run_once(args.image, args.debug, args.no_guard)
+        _run_once(args.image, args.debug, args.no_guard, push=True)
         elapsed = time.monotonic() - t0
         time.sleep(max(0.0, interval - elapsed))
 

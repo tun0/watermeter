@@ -19,22 +19,21 @@ The file at `k8s/configmap.yaml` inside this repo is a dummy placeholder — do 
 
 ## State file recovery
 
-When the reader is stuck rejecting readings, update the state file directly:
+When the reader is stuck rejecting readings, use `--last-reading` to force a known-good baseline for a single run. The script computes the current reading, validates it against the provided baseline, and writes the result to state:
 
 ```
-kubectl --context k3s-home -n watermeter exec deploy/meter-reader -- python3 -c "
-import json, pathlib
-p = pathlib.Path('/app/data/.meter_state.json')
-p.write_text(json.dumps({'last_reading': <VALUE>, 'dial_zero_offsets': [None, None, None, None]}, indent=2))
-print(p.read_text())
-"
+kubectl --context k3s-home -n watermeter exec deploy/meter-reader -- python3 meter_reader.py --last-reading <VALUE>
 ```
 
-`<VALUE>` = physical meter reading − 0.3705 (DIAL_PHASE_CORRECTION). Always reset dial_zero_offsets to all null.
+`<VALUE>` is the last known-good reading (e.g. from HA history). Do not read it from the physical meter display — the computed fractional part differs from the meter face due to the dial zero offsets.
 
-## Rollover stuck state
+If no prior reading is known at all, use `--no-guard` instead to skip validation entirely:
 
-If the reader is stuck with a consistent +1.0 jump (e.g. `303.9763 → 304.9891`), the OCR-ahead rollover bridge was missing — fixed as of 2026-06-17. Post-fix, no manual intervention needed at rollovers. Before the fix deploys, set `last_reading` to just below the computed value to unblock.
+```
+kubectl --context k3s-home -n watermeter exec deploy/meter-reader -- python3 meter_reader.py --no-guard
+```
+
+Add `--push` to any one-off command to also update HA in the same run.
 
 ## Docker Compose — running locally
 
@@ -55,4 +54,4 @@ After any physical camera remount:
 1. `curl -s "http://192.168.178.57:8080/" -o /tmp/meter_now.jpg`
 2. `python3 calibrate.py --image /tmp/meter_now.jpg --rotation <current_ROTATE_DEG> --grid` — verify boxes
 3. `python3 calibrate.py --image /tmp/meter_now.jpg --rotation <best_deg> --interactive` — get new constants
-4. Paste output into `meter_reader.py`, update state file with corrected reading, commit both repos
+4. Update the environment variable configuration (configmap, `.env`, etc.) with new constants, update the state file with the corrected reading, commit
