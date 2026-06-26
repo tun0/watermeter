@@ -344,9 +344,11 @@ def rollover_coverage(digital: list[int | None],
             break
 
     if frac >= ROLLOVER_START:
+        corrected = [pos for pos in transitioning if result[pos] != last_digs[pos]]
         for pos in transitioning:
             result[pos] = last_digs[pos]
-        log.info("rollover: in progress frac=%.4f, forcing digits %s → old", frac, transitioning)
+        if corrected:
+            log.info("rollover: in progress frac=%.4f, corrected digits %s → old", frac, corrected)
     elif last_frac >= ROLLOVER_START:
         for pos in transitioning:
             result[pos] = (last_digs[pos] + 1) % 10
