@@ -196,9 +196,7 @@ function buildGrid() {
       '<img src="'+imgPath(f)+'" data-f="'+f+'" loading="lazy">'+
       '<div class="ts">'+parseTs(f).toLocaleString()+'</div>';
     card.addEventListener('click', ()=>toggleSel(i));
-    card.querySelector('img').addEventListener('dblclick', e=>{
-      e.stopPropagation(); openLb(i);
-    });
+    card.addEventListener('dblclick', ()=>openLb(i));
     grid.appendChild(card);
   });
   document.getElementById('status').textContent =
