@@ -158,34 +158,49 @@ def _ocr_single_digit(crop: np.ndarray) -> int | None:
     return None
 
 
-def read_digital_digits(img: np.ndarray,
-                        last_int: int | None = None) -> list[int | None]:
-    """Return list of 5 ints (or None per failed digit) from the digital counter."""
-    sx, sy, sw, sh = DIGITAL_STRIP
-    strip = img[sy:sy + sh, sx:sx + sw]
-    strip3x = cv2.resize(strip, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(cv2.cvtColor(strip3x, cv2.COLOR_BGR2GRAY), (3, 3), 0)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
-                                cv2.BORDER_CONSTANT, value=255)
-    n = len(DIGITAL_DIGITS)
-    for psm in (7, 6, 8):
-        cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
-        result = "".join(pytesseract.image_to_string(thresh, config=cfg).split())
-        if result.isdigit() and n - 2 <= len(result) <= n:
-            digits = [int(c) for c in result.zfill(n)]
-            assembled_int = int("".join(str(d) for d in digits))
-            if last_int is None or 0 <= assembled_int - last_int <= 1:
-                return digits
-            log.info("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
-                     result, result.zfill(n), last_int)
-            break
+def read_digital_digits(img: np.ndarray, last_int: int | None = None,
+                        pinned: dict[int, int] | None = None) -> list[int | None]:
+    """Return list of 5 ints (or None per failed digit) from the digital counter.
 
-    log.info("strip OCR gave no clean 5-digit result — falling back to per-digit")
-    digits = [_ocr_single_digit(img[y:y + h, x:x + w]) for x, y, w, h in DIGITAL_DIGITS]
+    pinned: positions already determined by rollover logic. When non-empty, strip
+    OCR is skipped entirely (it fails on the rotating drum anyway) and those
+    positions are not OCR'd — their values are taken directly from the dict.
+    """
+    if pinned is None:
+        pinned = {}
+    n = len(DIGITAL_DIGITS)
+
+    if not pinned:
+        sx, sy, sw, sh = DIGITAL_STRIP
+        strip = img[sy:sy + sh, sx:sx + sw]
+        strip3x = cv2.resize(strip, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        gray = cv2.GaussianBlur(cv2.cvtColor(strip3x, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
+                                    cv2.BORDER_CONSTANT, value=255)
+        for psm in (7, 6, 8):
+            cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
+            result = "".join(pytesseract.image_to_string(thresh, config=cfg).split())
+            if result.isdigit() and n - 2 <= len(result) <= n:
+                digits = [int(c) for c in result.zfill(n)]
+                assembled_int = int("".join(str(d) for d in digits))
+                if last_int is None or 0 <= assembled_int - last_int <= 1:
+                    return digits
+                log.info("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
+                         result, result.zfill(n), last_int)
+                break
+        log.info("strip OCR gave no clean 5-digit result — falling back to per-digit")
+
+    digits: list[int | None] = [pinned.get(i) for i in range(n)]
+    for i, (x, y, w, h) in enumerate(DIGITAL_DIGITS):
+        if i not in pinned:
+            digits[i] = _ocr_single_digit(img[y:y + h, x:x + w])
+
     if last_int is not None:
         last_digs = [int(c) for c in f"{last_int:05d}"]
         for i, d in enumerate(digits):
+            if i in pinned:
+                continue
             rollover = (last_digs[i] + 1) % 10
             if d is None:
                 digits[i] = last_digs[i]
@@ -198,7 +213,7 @@ def read_digital_digits(img: np.ndarray,
         if not (0 <= assembled - last_int <= 1):
             log.info("per-digit assembled %d implausible vs last=%d — reverting",
                      assembled, last_int)
-            digits = list(last_digs)
+            digits = [pinned.get(i, last_digs[i]) for i in range(n)]
     return digits
 
 
