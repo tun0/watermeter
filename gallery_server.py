@@ -156,9 +156,9 @@ function renderSel() {
   const zbar = document.getElementById('zoom-bar');
   if (sel.length === 2) {
     zbar.classList.add('show');
-    // sel is sorted by display index; FILES is newest-first, so sel[1] is older
+    // sel is sorted by display index; FILES is oldest-first, so sel[0] is older
     document.getElementById('zoom-msg').textContent =
-      parseTs(FILES[sel[1]]).toLocaleString() + '  →  ' + parseTs(FILES[sel[0]]).toLocaleString();
+      parseTs(FILES[sel[0]]).toLocaleString() + '  →  ' + parseTs(FILES[sel[1]]).toLocaleString();
   } else {
     zbar.classList.remove('show');
   }
@@ -168,10 +168,10 @@ function clearSel() { sel.length=0; renderSel(); }
 
 function doZoom() {
   if (sel.length !== 2) return;
-  // FILES is newest-first: sel[0] (lower index) = newer = end; sel[1] = older = start
+  // FILES is oldest-first: sel[0] (lower index) = older = start; sel[1] = newer = end
   const p = new URLSearchParams({
-    start: FILES[sel[1]].slice(0,15),
-    end:   FILES[sel[0]].slice(0,15),
+    start: FILES[sel[0]].slice(0,15),
+    end:   FILES[sel[1]].slice(0,15),
     max:   document.getElementById('maxn').value,
     ann:   document.getElementById('ann').checked ? '1' : '0',
   });
@@ -313,8 +313,6 @@ class _Handler(BaseHTTPRequestHandler):
         matched = all_files[lo:hi]
 
         sampled = _sample(matched, max_n)
-        # Newest-first for display
-        sampled.reverse()
 
         js_files = '[' + ','.join(f'"{f}"' for f in sampled) + ']'
 
