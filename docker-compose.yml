@@ -1,17 +1,4 @@
 services:
-  collector:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    user: "${DOCKER_UID}:${DOCKER_GID}"
-    environment:
-      CAM_SNAPSHOT_URL: ${CAM_SNAPSHOT_URL:-http://192.168.x.x/}
-      CAM_STREAM_URL:   ${CAM_STREAM_URL:-http://192.168.x.x:8080/}
-      COLLECTOR_INTERVAL: ${COLLECTOR_INTERVAL:-10}
-    volumes:
-      - ./snapshots:/app/snapshots
-
   meter_reader:
     build:
       context: .
@@ -32,4 +19,6 @@ services:
       context: .
       dockerfile: Dockerfile.reader
       target: test
+    volumes:
+      - .:/app
     profiles: [test]

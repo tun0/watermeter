@@ -310,9 +310,23 @@ def assemble_reading(digital: list[int | None],
     if any(a is None for a in raw_angles):
         raise ValueError(f"Needle detection failure — angles: {raw_angles}")
 
-    integer_part  = int("".join(str(d) for d in digital))
-    analog_digits = [dial_influenced_digit(i, raw_angles) for i in range(len(raw_angles))]
-    fractional    = sum(d * 10 ** -(i + 1) for i, d in enumerate(analog_digits))
+    integer_part = int("".join(str(d) for d in digital))
+    n            = len(raw_angles)
+    influenced   = [dial_influenced_digit(i, raw_angles) for i in range(n)]
+    raw_corr     = [corrected_digit(corrected_angle(raw_angles[i], DIAL_ZERO_OFFSETS[i]))
+                    for i in range(n)]
+    digits       = list(influenced)
+
+    # dial_influenced_digit detects "A(i+1) just drove A(i)" by looking at A(i+1)'s angle.
+    # But dial_influenced_digit for A(i-1) still sees A(i)'s physical angle (near 354°),
+    # so it won't fire even though A(i) logically crossed. Propagate the carry manually:
+    # if dial i advanced (9→0) and dial i-1 didn't advance on its own, increment i-1.
+    for i in range(n - 1, 0, -1):
+        if influenced[i] == 0 and raw_corr[i] == 9:
+            if not (influenced[i - 1] == 0 and raw_corr[i - 1] == 9):
+                digits[i - 1] = (digits[i - 1] + 1) % 10
+
+    fractional = sum(d * 10 ** -(i + 1) for i, d in enumerate(digits))
     return round(integer_part + fractional, 4)
 
 
@@ -324,6 +338,21 @@ def corrected_fraction(raw_angles: list[float | None]) -> float | None:
         return None
     total = sum(
         dial_influenced_digit(i, raw_angles) * 10 ** -(i + 1)
+        for i in range(len(raw_angles))
+    )
+    return round(total, 4)
+
+
+def corrected_fraction_exit(raw_angles: list[float | None]) -> float | None:
+    """Stable fraction for rollover-exit detection; uses corrected_digit only.
+
+    Unlike corrected_fraction, does not apply dial influence — so it only drops
+    below ROLLOVER_START when A0 has physically crossed the boundary, not when
+    dial_influenced_digit prematurely advances A0 at the 9→0 threshold."""
+    if any(a is None for a in raw_angles):
+        return None
+    total = sum(
+        corrected_digit(corrected_angle(raw_angles[i], DIAL_ZERO_OFFSETS[i])) * 10 ** -(i + 1)
         for i in range(len(raw_angles))
     )
     return round(total, 4)
@@ -343,8 +372,9 @@ def rollover_coverage(digital: list[int | None],
 
     During transition → force to 9.  After transition → force to 0.
     """
-    frac = corrected_fraction(raw_angles)
-    if frac is None:
+    frac      = corrected_fraction(raw_angles)
+    frac_exit = corrected_fraction_exit(raw_angles)
+    if frac is None or frac_exit is None:
         return digital
 
     last = state.get("last_reading")
@@ -370,7 +400,10 @@ def rollover_coverage(digital: list[int | None],
             result[pos] = last_digs[pos]
         if corrected:
             log.info("rollover: in progress frac=%.4f, corrected digits %s → old", frac, corrected)
-    elif last_frac >= ROLLOVER_START:
+    elif last_frac >= ROLLOVER_START and frac_exit < ROLLOVER_START:
+        # Use frac_exit (corrected_digit only) to confirm A0 physically crossed.
+        # frac alone can drop below ROLLOVER_START prematurely when dial_influenced_digit
+        # advances A0 at the 9→0 threshold before A0's angle actually crosses.
         for pos in transitioning:
             result[pos] = (last_digs[pos] + 1) % 10
         log.info("rollover: complete frac=%.4f (was %.4f), forcing digits %s → new",
@@ -408,6 +441,9 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
         allowed = MAX_STEP
 
     delta = new_val - last
+    if delta >= MAX_DELTA_CAP:
+        return False, (f"jump {delta:+.4f} exceeds cap {MAX_DELTA_CAP:.4f} "
+                       f"({last:.4f} → {new_val:.4f})")
     if delta > allowed:
         return False, (f"jump {delta:+.4f} exceeds allowed {allowed:.4f} "
                        f"({last:.4f} → {new_val:.4f})")

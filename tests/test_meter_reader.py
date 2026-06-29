@@ -129,6 +129,21 @@ def test_assemble_reading_fractional():
     reading = mr.assemble_reading([0, 0, 0, 0, 0], raw)
     assert reading == pytest.approx(0.1, abs=1e-4)
 
+def test_assemble_reading_carry_from_inner_dial_advance():
+    # A1 is at digit 9, sub=0.96 (> DIAL_INFLUENCE_HIGH): dial_influenced_digit advances it to 0.
+    # A2 is near angle 0 (driver_sub=0.003 < DIAL_INFLUENCE_LOW): this is what triggers the advance.
+    # A0 is at digit 5, sub=0.5: its own advance condition does NOT fire (sub < DIAL_INFLUENCE_HIGH).
+    #
+    # Without carry propagation: reading = 310.5006 (A1 drops 9→0, A0 stays at 5).
+    # With carry propagation:    reading = 310.6006 (A1 advance carries into A0: 5→6).
+    raw = [
+        Z[0] + 5.5 * 36,   # A0: corrected=198°, digit=5, sub=0.5
+        Z[1] + 9.96 * 36,  # A1: corrected=358.56°, digit=9, sub=0.96 → will be advanced to 0
+        Z[2] + 1.0,         # A2: corrected=1°, digit=0, driver_sub=0.003 → triggers A1 advance
+        Z[3] + 6.0 * 36,   # A3: corrected=216°, digit=6
+    ]
+    assert mr.assemble_reading([0, 0, 3, 1, 0], raw) == pytest.approx(310.6006, abs=1e-4)
+
 
 # ── corrected_fraction ────────────────────────────────────────────────────────
 
@@ -281,6 +296,39 @@ def test_validate_no_timestamp_uses_max_step():
     ok, reason = mr.validate(100.0 + mr.MAX_STEP + 0.001,
                              {"last_reading": 100.0})
     assert not ok
+
+def test_validate_at_max_delta_cap_is_rejected():
+    # delta == MAX_DELTA_CAP must be rejected; the cap is an exclusive upper bound.
+    # Previously delta > allowed (strict) let exactly-cap readings through.
+    old_ts = time.time() - 10000
+    state  = {"last_reading": 100.0, "last_reading_ts": old_ts}
+    ok, reason = mr.validate(100.0 + mr.MAX_DELTA_CAP, state)
+    assert not ok
+    assert "cap" in reason
+
+
+# ── corrected_fraction_exit ───────────────────────────────────────────────────
+
+def test_corrected_fraction_exit_stable_near_boundary():
+    # A0 at digit 9, sub=0.96: dial_influenced_digit (used by corrected_fraction)
+    # advances A0 to 0, dropping the fraction to ~0.0.
+    # corrected_fraction_exit uses corrected_digit only — A0 stays at 9 → 0.9.
+    a0_near_boundary = Z[0] + 9.96 * 36  # corrected=358.56°, digit=9, sub=0.96
+    a1_at_zero       = Z[1]              # corrected=0°, driver_sub=0 → triggers advance
+    raw = [a0_near_boundary, a1_at_zero, Z[2], Z[3]]
+    assert mr.corrected_fraction(raw)      == pytest.approx(0.0, abs=1e-4)
+    assert mr.corrected_fraction_exit(raw) == pytest.approx(0.9, abs=1e-4)
+
+def test_rollover_complete_does_not_fire_on_premature_fraction_advance():
+    # A0 sub=0.96 near 9→0: dial_influenced_digit advances A0 prematurely,
+    # making corrected_fraction < ROLLOVER_START while A0 hasn't physically crossed.
+    # With last_frac >= ROLLOVER_START the "complete" branch must NOT fire.
+    a0_near_boundary = Z[0] + 9.96 * 36
+    a1_at_zero       = Z[1]
+    angles = [a0_near_boundary, a1_at_zero, Z[2], Z[3]]
+    state  = {"last_reading": 310.9853}   # last_frac=0.9853 >= ROLLOVER_START
+    result = mr.rollover_coverage([0, 0, 3, 1, 0], angles, state)
+    assert result == [0, 0, 3, 1, 0]     # no spurious advance to 311
 
 
 # ── .env.dist completeness ────────────────────────────────────────────────────
