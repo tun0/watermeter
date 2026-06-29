@@ -10,7 +10,11 @@ import requests
 CAM_SNAPSHOT_URL = os.getenv("CAM_SNAPSHOT_URL", "http://192.168.x.x/")
 CAM_STREAM_URL   = os.getenv("CAM_STREAM_URL",   "http://192.168.x.x:8080/")
 INTERVAL         = int(os.getenv("COLLECTOR_INTERVAL", "10"))
+MAX_AGE_HOURS    = float(os.getenv("COLLECTOR_MAX_AGE_HOURS", "48"))
 TIMEOUT          = 15
+
+snapshots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+os.makedirs(snapshots_dir, exist_ok=True)
 
 
 def warm_camera():
@@ -37,26 +41,41 @@ def fetch_snapshot() -> bytes:
     raise RuntimeError("Could not fetch snapshot after 3 attempts")
 
 
-session_dir = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "snapshots",
-    datetime.now().strftime("%Y%m%d_%H%M%S"),
-)
-os.makedirs(session_dir, exist_ok=True)
+def prune_old_snapshots():
+    """Delete snapshot files older than MAX_AGE_HOURS."""
+    if MAX_AGE_HOURS <= 0:
+        return
+    cutoff = time.time() - MAX_AGE_HOURS * 3600
+    pruned = 0
+    try:
+        for entry in os.scandir(snapshots_dir):
+            if entry.is_file() and entry.name.endswith(".jpg"):
+                if entry.stat().st_mtime < cutoff:
+                    os.unlink(entry.path)
+                    pruned += 1
+    except OSError:
+        pass
+    if pruned:
+        print(f"pruned {pruned} snapshots older than {MAX_AGE_HOURS}h", flush=True)
+
+
 print(f"Camera:    {CAM_SNAPSHOT_URL}", flush=True)
 print(f"Interval:  {INTERVAL}s", flush=True)
-print(f"Saving to: {session_dir}", flush=True)
+print(f"Max age:   {MAX_AGE_HOURS}h", flush=True)
+print(f"Saving to: {snapshots_dir}", flush=True)
 
 count = 0
 while True:
     t0 = time.monotonic()
     try:
         data = fetch_snapshot()
-        fname = os.path.join(session_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg")
+        fname = os.path.join(snapshots_dir, datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg")
         with open(fname, "wb") as f:
             f.write(data)
         count += 1
         print(f"[{count}] {os.path.basename(fname)}", flush=True)
+        if count % 360 == 0:
+            prune_old_snapshots()
     except Exception as e:
         print(f"[{count}] WARN: {e}", flush=True)
     elapsed = time.monotonic() - t0

@@ -81,7 +81,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
       - name: Notify Flux
-        if: matrix.name == 'reader'
         env:
           WEBHOOK_URL: ${{ secrets.FLUX_WEBHOOK_URL }}
           WEBHOOK_TOKEN: ${{ secrets.FLUX_WEBHOOK_TOKEN }}
