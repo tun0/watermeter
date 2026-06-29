@@ -31,6 +31,7 @@ import math
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -113,6 +114,11 @@ READING_INTERVAL = float(_env("READING_INTERVAL"))
 MAX_STEP         = float(_env("MAX_STEP"))
 MAX_DELTA_CAP    = float(_env("MAX_DELTA_CAP"))
 JITTER_TOLERANCE = float(_env("JITTER_TOLERANCE"))
+
+# Snapshots (optional — disabled when SNAPSHOT_DIR is unset)
+SNAPSHOT_DIR          = os.environ.get("SNAPSHOT_DIR")
+_max_age              = os.environ.get("SNAPSHOT_MAX_AGE_DAYS")
+SNAPSHOT_MAX_AGE_DAYS = float(_max_age) if _max_age is not None else None
 
 # State
 STATE_FILE   = Path(_env("STATE_FILE"))
@@ -510,19 +516,62 @@ def process(img: np.ndarray, debug: bool = False,
     return reading, digital, raw_angles
 
 
-def _fetch_image(image_path: str | None) -> np.ndarray:
+def _fetch_image(image_path: str | None) -> tuple[np.ndarray, bytes | None]:
+    """Returns (img, raw_jpeg). raw_jpeg is None for file-based images."""
     if image_path:
         img = cv2.imread(image_path)
         if img is None:
             raise RuntimeError(f"Cannot read image: {image_path}")
-        return img
+        return img, None
     r = requests.get(CAM_SNAPSHOT_URL, timeout=15)
     r.raise_for_status()
-    arr = np.frombuffer(r.content, dtype=np.uint8)
+    raw = r.content
+    arr = np.frombuffer(raw, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
         raise RuntimeError("Failed to decode image from camera")
-    return img
+    return img, raw
+
+
+_snapshot_count = 0
+
+
+def _save_snapshot(raw: bytes, img: np.ndarray,
+                   digital: list[int | None], raw_angles: list[float | None]) -> None:
+    global _snapshot_count
+    if not SNAPSHOT_DIR:
+        return
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    raw_dir = os.path.join(SNAPSHOT_DIR, "raw")
+    ann_dir = os.path.join(SNAPSHOT_DIR, "annotated")
+    os.makedirs(raw_dir, exist_ok=True)
+    os.makedirs(ann_dir, exist_ok=True)
+    with open(os.path.join(raw_dir, f"{ts}.jpg"), "wb") as f:
+        f.write(raw)
+    rotated = rotate_image(img, ROTATE_DEG)
+    cv2.imwrite(os.path.join(ann_dir, f"{ts}.jpg"), annotate(rotated, digital, raw_angles))
+    _snapshot_count += 1
+    if _snapshot_count % 360 == 0:
+        _prune_snapshots()
+
+
+def _prune_snapshots() -> None:
+    if not SNAPSHOT_DIR or SNAPSHOT_MAX_AGE_DAYS is None:
+        return
+    cutoff = time.time() - SNAPSHOT_MAX_AGE_DAYS * 86400
+    pruned = 0
+    for subdir in ("raw", "annotated"):
+        path = os.path.join(SNAPSHOT_DIR, subdir)
+        try:
+            for entry in os.scandir(path):
+                if entry.is_file() and entry.name.endswith(".jpg"):
+                    if entry.stat().st_mtime < cutoff:
+                        os.unlink(entry.path)
+                        pruned += 1
+        except OSError:
+            pass
+    if pruned:
+        log.info("pruned %d snapshots older than %.1f days", pruned, SNAPSHOT_MAX_AGE_DAYS)
 
 
 def _run_once(image_path: str | None, debug: bool, no_guard: bool,
@@ -533,8 +582,10 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
         state["last_reading"] = last_reading
         state.pop("last_reading_ts", None)
     try:
-        img = _fetch_image(image_path)
+        img, raw_jpeg = _fetch_image(image_path)
         reading, digital, raw_angles = process(img, debug=debug, state=state)
+        if raw_jpeg is not None:
+            _save_snapshot(raw_jpeg, img, digital, raw_angles)
     except (ValueError, RuntimeError, requests.exceptions.RequestException) as e:
         log.error("%s", e)
         return None
