@@ -7,6 +7,7 @@ on:
       - .github/workflows/build.yml
       - Dockerfile.reader
       - meter_reader.py
+      - gallery_server.py
       - pyproject.toml
       - requirements*.txt
       - tests/**
@@ -62,6 +63,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.reader
+          target: production
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

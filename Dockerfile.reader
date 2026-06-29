@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY meter_reader.py .
+COPY gallery_server.py .
 COPY .env.dist .
 
 
@@ -27,3 +28,7 @@ CMD ["pytest", "-v"]
 FROM base AS production
 
 CMD ["python3", "-u", "meter_reader.py", "--loop"]
+
+FROM base AS gallery
+
+CMD ["python3", "-u", "gallery_server.py"]
