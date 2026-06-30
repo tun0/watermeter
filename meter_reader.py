@@ -194,34 +194,41 @@ def read_digital_digits(img: np.ndarray, last_int: int | None = None,
         thresh_dilated = cv2.dilate(thresh, np.ones((3, 1), np.uint8))
 
         best_len, best_digits = 0, None
-        for t in (thresh, thresh_dilated):
+        seen: dict[str, str] = {}   # raw_result → rejection reason (for diagnostics)
+        for t_label, t in (("plain", thresh), ("dilated", thresh_dilated)):
             padded = cv2.copyMakeBorder(t, 12, 12, 12, 12,
                                         cv2.BORDER_CONSTANT, value=255)
             for psm in (7, 6, 8):
                 cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
                 result = "".join(pytesseract.image_to_string(padded, config=cfg).split())
                 if not result.isdigit():
+                    seen.setdefault(repr(result), f"non-digit (psm={psm},{t_label})")
                     continue
                 rlen = len(result)
                 # Without a last_int anchor, short zfills are untrustworthy — need full n digits
                 min_len = n if last_int is None else n - 2
                 if not (min_len <= rlen <= n):
+                    seen.setdefault(repr(result),
+                                    f"len={rlen} outside [{min_len},{n}] (psm={psm},{t_label})")
                     continue
                 digits = [int(c) for c in result.zfill(n)]
                 assembled_int = int("".join(str(d) for d in digits))
                 if last_int is not None and not (0 <= assembled_int - last_int <= 1):
-                    log.debug("strip OCR '%s' assembled=%d implausible vs last=%d",
-                              result, assembled_int, last_int)
+                    seen.setdefault(repr(result),
+                                    f"assembled={assembled_int} implausible vs last={last_int}"
+                                    f" (psm={psm},{t_label})")
                     continue
                 # Prefer longer results (exact n-digit match is more reliable than zfilled shorter)
                 if rlen > best_len:
                     best_len, best_digits = rlen, digits
+                    seen[repr(result)] = "accepted"
                 if rlen == n:
                     return best_digits  # perfect — no point trying more variants
 
         if best_digits is not None:
             return best_digits
-        log.info("strip OCR gave no clean result — falling back to per-digit")
+        attempts = "; ".join(f"{k}: {v}" for k, v in seen.items()) or "all empty"
+        log.info("strip OCR fallback to per-digit — attempts: %s", attempts)
 
     digits: list[int | None] = [pinned.get(i) for i in range(n)]
     for i, (x, y, w, h) in enumerate(DIGITAL_DIGITS):
