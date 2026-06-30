@@ -148,20 +148,28 @@ def rotate_image(img: np.ndarray, deg: float) -> np.ndarray:
 def _ocr_single_digit(crop: np.ndarray) -> int | None:
     """Return int 0–9 from a digit crop, or None on failure."""
     crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    # CLAHE normalises contrast before blur+threshold — helps thin digits in uneven light
+    gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(gray)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
     cfg = r"--psm 10 --oem 3 -c tessedit_char_whitelist=0123456789"
+    best_digit, best_conf = None, -1
     for invert in (False, True):
         src = 255 - gray if invert else gray
-        _, thresh = cv2.threshold(src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
-                                    cv2.BORDER_CONSTANT, value=255)
-        data = pytesseract.image_to_data(
-            thresh, config=cfg, output_type=pytesseract.Output.DICT)
-        for text, conf in zip(data["text"], data["conf"]):
-            text = text.strip()
-            if text.isdigit():
-                return int(text)
-    return None
+        for thresh in (
+            cv2.threshold(src, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+            cv2.adaptiveThreshold(src, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY, 11, 2),
+        ):
+            padded = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
+                                        cv2.BORDER_CONSTANT, value=255)
+            data = pytesseract.image_to_data(
+                padded, config=cfg, output_type=pytesseract.Output.DICT)
+            for text, conf in zip(data["text"], data["conf"]):
+                text = text.strip()
+                if text.isdigit() and int(conf) > best_conf:
+                    best_digit, best_conf = int(text), int(conf)
+    return best_digit
 
 
 def read_digital_digits(img: np.ndarray, last_int: int | None = None,
@@ -182,20 +190,38 @@ def read_digital_digits(img: np.ndarray, last_int: int | None = None,
         strip3x = cv2.resize(strip, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
         gray = cv2.GaussianBlur(cv2.cvtColor(strip3x, cv2.COLOR_BGR2GRAY), (3, 3), 0)
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        thresh = cv2.copyMakeBorder(thresh, 12, 12, 12, 12,
-                                    cv2.BORDER_CONSTANT, value=255)
-        for psm in (7, 6, 8):
-            cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
-            result = "".join(pytesseract.image_to_string(thresh, config=cfg).split())
-            if result.isdigit() and n - 2 <= len(result) <= n:
+        # Dilated variant thickens thin strokes (like "1") to reduce Tesseract drop-outs
+        thresh_dilated = cv2.dilate(thresh, np.ones((3, 1), np.uint8))
+
+        best_len, best_digits = 0, None
+        for t in (thresh, thresh_dilated):
+            padded = cv2.copyMakeBorder(t, 12, 12, 12, 12,
+                                        cv2.BORDER_CONSTANT, value=255)
+            for psm in (7, 6, 8):
+                cfg = f"--psm {psm} --oem 3 -c tessedit_char_whitelist=0123456789"
+                result = "".join(pytesseract.image_to_string(padded, config=cfg).split())
+                if not result.isdigit():
+                    continue
+                rlen = len(result)
+                # Without a last_int anchor, short zfills are untrustworthy — need full n digits
+                min_len = n if last_int is None else n - 2
+                if not (min_len <= rlen <= n):
+                    continue
                 digits = [int(c) for c in result.zfill(n)]
                 assembled_int = int("".join(str(d) for d in digits))
-                if last_int is None or 0 <= assembled_int - last_int <= 1:
-                    return digits
-                log.info("strip OCR '%s' (zfilled '%s') looks wrong vs last=%d — falling back",
-                         result, result.zfill(n), last_int)
-                break
-        log.info("strip OCR gave no clean 5-digit result — falling back to per-digit")
+                if last_int is not None and not (0 <= assembled_int - last_int <= 1):
+                    log.debug("strip OCR '%s' assembled=%d implausible vs last=%d",
+                              result, assembled_int, last_int)
+                    continue
+                # Prefer longer results (exact n-digit match is more reliable than zfilled shorter)
+                if rlen > best_len:
+                    best_len, best_digits = rlen, digits
+                if rlen == n:
+                    return best_digits  # perfect — no point trying more variants
+
+        if best_digits is not None:
+            return best_digits
+        log.info("strip OCR gave no clean result — falling back to per-digit")
 
     digits: list[int | None] = [pinned.get(i) for i in range(n)]
     for i, (x, y, w, h) in enumerate(DIGITAL_DIGITS):
