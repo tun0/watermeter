@@ -208,9 +208,10 @@ def test_rollover_complete_forces_0_when_was_9():
     assert result == [0, 0, 3, 1, 0]
 
 def test_rollover_mid_reading_no_change():
+    # Ones digit matches last reading (6) — no correction expected
     state  = {"last_reading": 306.3}
     angles = _angles_for_frac(0.4)
-    digital = [0, 0, 3, 0, 5]
+    digital = [0, 0, 3, 0, 6]
     assert mr.rollover_coverage(digital, angles, state) == digital
 
 def test_rollover_no_state_no_change():
@@ -246,6 +247,18 @@ def test_rollover_none_angles_no_change():
     digital = [0, 0, 3, 0, 5]
     result = mr.rollover_coverage(digital, angles, state)
     assert result == digital
+
+def test_rollover_ocr_misread_outside_transition_is_reverted():
+    # Simulates the 311→312 OCR misread at 18:46:38:
+    # per-digit reads "2" for the ones digit but fraction is clearly mid-range —
+    # no rollover active, so rollover_coverage must revert it back to "1".
+    state  = {"last_reading": 311.0016}
+    # Angles: A0 just past zero (fraction ~0.01), far below ROLLOVER_START
+    a0_mid = Z[0] + 0.1 * 36  # ~0.1 of a turn → corrected_digit ≈ 0
+    angles = [a0_mid, Z[1], Z[2], Z[3]]
+    digital = [0, 0, 3, 1, 2]   # OCR misread: should be 311 not 312
+    result = mr.rollover_coverage(digital, angles, state)
+    assert result == [0, 0, 3, 1, 1]
 
 
 # ── validate ──────────────────────────────────────────────────────────────────

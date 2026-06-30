@@ -408,6 +408,14 @@ def rollover_coverage(digital: list[int | None],
             result[pos] = (last_digs[pos] + 1) % 10
         log.info("rollover: complete frac=%.4f (was %.4f), forcing digits %s → new",
                  frac, last_frac, transitioning)
+    else:
+        # No rollover in progress or complete. Integer digits must not change —
+        # any difference vs last_digs is an OCR misread (e.g. "1" read as "2").
+        reverted = [pos for pos in transitioning if result[pos] != last_digs[pos]]
+        if reverted:
+            for pos in reverted:
+                result[pos] = last_digs[pos]
+            log.info("rollover: no transition active, reverted OCR digit error at pos %s", reverted)
 
     return result
 
