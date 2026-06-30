@@ -520,7 +520,9 @@ def annotate(img: np.ndarray, digital: list[int | None],
     for i, (cx, cy, r) in enumerate(ANALOG_DIALS):
         cv2.circle(out, (cx, cy), r, (255, 160, 0), 2)
 
-        # Tick marks at each digit position; 0 = bright yellow, 1-9 = dim gray
+        # Tick ring in raw angle space, phase-shifted per dial by DIAL_ZERO_OFFSETS[i].
+        # Tick "0" lands at the dial's calibrated zero position, not at 12 o'clock
+        # (except A4 which has offset=0).  The physical needle aligns with these ticks.
         for digit in range(10):
             tick_rad = math.radians((digit * 36 + DIAL_ZERO_OFFSETS[i]) % 360)
             s, ca = math.sin(tick_rad), math.cos(tick_rad)
@@ -531,15 +533,14 @@ def annotate(img: np.ndarray, digital: list[int | None],
             p2 = (int(cx + r * s),              int(cy - r * ca))
             cv2.line(out, p1, p2, color, thickness)
 
-        # Needle lines: gray = raw angle, red = corrected angle
         raw  = raw_angles[i]
         corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[i]) if raw is not None else None
-        for angle, color in ((raw, (120, 120, 120)), (corr, (0, 0, 255))):
-            if angle is not None:
-                a   = math.radians(angle)
-                tip = (int(cx + (r - 12) * math.sin(a)),
-                       int(cy - (r - 12) * math.cos(a)))
-                cv2.line(out, (cx, cy), tip, color, 2)
+        # Single needle at the physical (raw) angle — aligns with the tick ring above.
+        if raw is not None:
+            a   = math.radians(raw)
+            tip = (int(cx + (r - 12) * math.sin(a)),
+                   int(cy - (r - 12) * math.cos(a)))
+            cv2.line(out, (cx, cy), tip, (0, 200, 255), 2)
 
         # Centre: always show corrected_digit (raw needle → digit, no influence).
         # When dial_influenced_digit differs, append "→N" in orange to show correction.
@@ -550,7 +551,7 @@ def annotate(img: np.ndarray, digital: list[int | None],
             cv2.putText(out, str(cd), (cx - 8, cy + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, base_color, 2)
             if inf_d != cd:
-                cv2.putText(out, f"→{inf_d}", (cx + 10, cy + 5),
+                cv2.putText(out, f">{inf_d}", (cx + 10, cy + 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         else:
             cv2.putText(out, "?", (cx - 8, cy + 5),
@@ -747,6 +748,22 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
     return reading
 
 
+def _reannotate_one(raw_path: str) -> None:
+    """Re-annotate a single raw snapshot and write the result to annotated/."""
+    img = cv2.imread(raw_path)
+    if img is None:
+        log.error("Cannot read image: %s", raw_path)
+        sys.exit(1)
+    ann_dir = os.path.join(os.path.dirname(raw_path), "..", "annotated")
+    os.makedirs(ann_dir, exist_ok=True)
+    out_path = os.path.join(ann_dir, os.path.basename(raw_path))
+    rotated    = rotate_image(img, ROTATE_DEG)
+    digital    = read_digital_digits(rotated)
+    raw_angles = read_analog_dials(rotated)
+    cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
+    print(f"Annotated: {os.path.realpath(out_path)}", flush=True)
+
+
 def _reannotate_all() -> None:
     """Re-process all existing raw snapshots and overwrite their annotated images."""
     if not SNAPSHOT_DIR:
@@ -795,15 +812,19 @@ def main() -> None:
                     help="Override last_reading baseline for this run (not allowed with --loop)")
     ap.add_argument("--push",         action="store_true",
                     help="Push result to HA even on a one-off run")
-    ap.add_argument("--reannotate",   action="store_true",
-                    help="Re-annotate all existing raw snapshots and exit")
+    ap.add_argument("--reannotate", nargs="?", const="all", metavar="IMAGE",
+                    help="Re-annotate snapshots and exit. Without a path: all raw snapshots. "
+                         "With a path: that single raw image (writes annotated/ alongside it).")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
 
-    if args.reannotate:
-        _reannotate_all()
+    if args.reannotate is not None:
+        if args.reannotate == "all":
+            _reannotate_all()
+        else:
+            _reannotate_one(args.reannotate)
         sys.exit(0)
 
     if args.last_reading is not None and args.loop:

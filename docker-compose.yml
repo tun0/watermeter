@@ -12,7 +12,19 @@ services:
       HA_URL:   ${HA_URL:-}
       HA_TOKEN: ${HA_TOKEN:-}
     volumes:
-      - ./data:/app/data
+      - .:/app
+
+  gallery:
+    build:
+      context: .
+      dockerfile: Dockerfile.reader
+      target: gallery
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    user: "${DOCKER_UID}:${DOCKER_GID}"
+    volumes:
+      - .:/app
 
   test:
     build:
