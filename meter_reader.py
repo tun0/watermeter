@@ -760,22 +760,26 @@ def _reannotate_all() -> None:
     if not paths:
         log.info("No raw snapshots found in %s", raw_dir)
         return
-    log.info("Reannotating %d snapshots …", len(paths))
+    total = len(paths)
+    print(f"Reannotating {total} snapshots …", flush=True)
     ok = err = 0
     for path in paths:
         img = cv2.imread(path)
         if img is None:
             log.warning("Cannot read %s — skipped", path)
             err += 1
-            continue
-        rotated    = rotate_image(img, ROTATE_DEG)
-        digital    = read_digital_digits(rotated)
-        raw_angles = read_analog_dials(rotated)
-        # No state/rollover for reannotation — show raw OCR as-is
-        out_path = os.path.join(ann_dir, os.path.basename(path))
-        cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
-        ok += 1
-    log.info("Reannotated %d images (%d errors)", ok, err)
+        else:
+            rotated    = rotate_image(img, ROTATE_DEG)
+            digital    = read_digital_digits(rotated)
+            raw_angles = read_analog_dials(rotated)
+            out_path   = os.path.join(ann_dir, os.path.basename(path))
+            cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
+            ok += 1
+        done = ok + err
+        pct  = done * 100 // total
+        bar  = "#" * (pct // 2) + "-" * (50 - pct // 2)
+        print(f"\r[{bar}] {pct:3d}%  {done}/{total}", end="", flush=True)
+    print(f"\nDone: {ok} annotated, {err} errors.", flush=True)
 
 
 def main() -> None:
