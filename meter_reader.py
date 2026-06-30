@@ -525,7 +525,7 @@ def annotate(img: np.ndarray, digital: list[int | None],
             tick_rad = math.radians((digit * 36 + DIAL_ZERO_OFFSETS[i]) % 360)
             s, ca = math.sin(tick_rad), math.cos(tick_rad)
             tick_len = 9 if digit == 0 else 5
-            color    = (0, 220, 255) if digit == 0 else (70, 70, 70)
+            color    = (0, 220, 255) if digit == 0 else (255, 255, 255)
             thickness = 2 if digit == 0 else 1
             p1 = (int(cx + (r - tick_len) * s), int(cy - (r - tick_len) * ca))
             p2 = (int(cx + r * s),              int(cy - r * ca))
