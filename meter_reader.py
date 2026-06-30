@@ -464,15 +464,41 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
 # ── Debug annotation ───────────────────────────────────────────────────────────
 
 def annotate(img: np.ndarray, digital: list[int | None],
-             raw_angles: list[float | None]) -> np.ndarray:
+             raw_angles: list[float | None],
+             ocr_digital: list[int | None] | None = None) -> np.ndarray:
     out = img.copy()
+
+    # ── Digital strip ──────────────────────────────────────────────────────────
     for i, (x, y, w, h) in enumerate(DIGITAL_DIGITS):
         cv2.rectangle(out, (x, y), (x + w, y + h), (0, 220, 0), 2)
         if digital[i] is not None:
-            cv2.putText(out, str(digital[i]), (x, y - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2)
+            d     = digital[i]
+            raw_d = ocr_digital[i] if ocr_digital is not None else d
+            if raw_d != d:
+                color = (0, 165, 255)   # orange: rollover-corrected
+            elif d == 0:
+                color = (0, 140, 0)     # dim green: zero (common leading digit)
+            else:
+                color = (0, 220, 0)     # bright green: significant non-zero
+            cv2.putText(out, str(d), (x, y - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    # ── Analog dials ───────────────────────────────────────────────────────────
     for i, (cx, cy, r) in enumerate(ANALOG_DIALS):
         cv2.circle(out, (cx, cy), r, (255, 160, 0), 2)
+
+        # Tick marks at each digit position; 0 = bright yellow, 1-9 = dim gray
+        for digit in range(10):
+            tick_rad = math.radians((digit * 36 + DIAL_ZERO_OFFSETS[i]) % 360)
+            s, ca = math.sin(tick_rad), math.cos(tick_rad)
+            tick_len = 9 if digit == 0 else 5
+            color    = (0, 220, 255) if digit == 0 else (70, 70, 70)
+            thickness = 2 if digit == 0 else 1
+            p1 = (int(cx + (r - tick_len) * s), int(cy - (r - tick_len) * ca))
+            p2 = (int(cx + r * s),              int(cy - r * ca))
+            cv2.line(out, p1, p2, color, thickness)
+
+        # Needle lines: gray = raw angle, red = corrected angle
         raw  = raw_angles[i]
         corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[i]) if raw is not None else None
         for angle, color in ((raw, (120, 120, 120)), (corr, (0, 0, 255))):
@@ -481,9 +507,24 @@ def annotate(img: np.ndarray, digital: list[int | None],
                 tip = (int(cx + (r - 12) * math.sin(a)),
                        int(cy - (r - 12) * math.cos(a)))
                 cv2.line(out, (cx, cy), tip, color, 2)
-        d = corrected_digit(corr) if corr is not None else "?"
-        cv2.putText(out, str(d), (cx - 8, cy + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+
+        # Centre digit: dial_influenced_digit (what the pipeline uses)
+        # Color: cyan = matches corrected_digit; orange = dial influence changed it; dim = zero
+        if corr is not None:
+            cd    = corrected_digit(corr)
+            inf_d = dial_influenced_digit(i, raw_angles)
+            if inf_d != cd:
+                d_color = (0, 165, 255)  # orange: influence correction applied
+            elif inf_d == 0:
+                d_color = (0, 180, 180)  # dim cyan: zero
+            else:
+                d_color = (0, 220, 255)  # bright cyan: non-zero, unmodified
+            cv2.putText(out, str(inf_d), (cx - 8, cy + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, d_color, 2)
+        else:
+            cv2.putText(out, "?", (cx - 8, cy + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+
     return out
 
 
@@ -533,12 +574,16 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def process(img: np.ndarray, debug: bool = False,
-            state: dict | None = None) -> tuple[float, list, list]:
-    """Returns (reading, digital, raw_angles)."""
+            state: dict | None = None) -> tuple[float, list, list, list]:
+    """Returns (reading, digital, raw_angles, ocr_digital).
+
+    ocr_digital is the raw OCR output before rollover_coverage correction.
+    """
     rotated    = rotate_image(img, ROTATE_DEG)
     last_int   = int(state["last_reading"]) if state and "last_reading" in state else None
     digital    = read_digital_digits(rotated, last_int=last_int)
     raw_angles = read_analog_dials(rotated)
+    ocr_digital = list(digital)  # snapshot before rollover correction
 
     if state:
         digital = rollover_coverage(digital, raw_angles, state)
@@ -553,11 +598,11 @@ def process(img: np.ndarray, debug: bool = False,
               reading)
 
     if debug:
-        ann = annotate(rotated, digital, raw_angles)
+        ann = annotate(rotated, digital, raw_angles, ocr_digital)
         cv2.imwrite("debug_reading.jpg", ann)
         log.debug("Annotated image saved to debug_reading.jpg")
 
-    return reading, digital, raw_angles
+    return reading, digital, raw_angles, ocr_digital
 
 
 def _fetch_image(image_path: str | None) -> tuple[np.ndarray, bytes | None]:
@@ -580,8 +625,9 @@ def _fetch_image(image_path: str | None) -> tuple[np.ndarray, bytes | None]:
 _snapshot_count = 0
 
 
-def _save_snapshot(raw: bytes, img: np.ndarray,
-                   digital: list[int | None], raw_angles: list[float | None]) -> None:
+def _save_snapshot(raw: bytes, img: np.ndarray, digital: list[int | None],
+                   raw_angles: list[float | None],
+                   ocr_digital: list[int | None] | None = None) -> None:
     global _snapshot_count
     if not SNAPSHOT_DIR:
         return
@@ -593,7 +639,8 @@ def _save_snapshot(raw: bytes, img: np.ndarray,
     with open(os.path.join(raw_dir, f"{ts}.jpg"), "wb") as f:
         f.write(raw)
     rotated = rotate_image(img, ROTATE_DEG)
-    cv2.imwrite(os.path.join(ann_dir, f"{ts}.jpg"), annotate(rotated, digital, raw_angles))
+    cv2.imwrite(os.path.join(ann_dir, f"{ts}.jpg"),
+                annotate(rotated, digital, raw_angles, ocr_digital))
     _snapshot_count += 1
     if _snapshot_count % 360 == 0:
         _prune_snapshots()
@@ -627,9 +674,9 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
         state.pop("last_reading_ts", None)
     try:
         img, raw_jpeg = _fetch_image(image_path)
-        reading, digital, raw_angles = process(img, debug=debug, state=state)
+        reading, digital, raw_angles, ocr_digital = process(img, debug=debug, state=state)
         if raw_jpeg is not None:
-            _save_snapshot(raw_jpeg, img, digital, raw_angles)
+            _save_snapshot(raw_jpeg, img, digital, raw_angles, ocr_digital)
     except (ValueError, RuntimeError, requests.exceptions.RequestException) as e:
         log.error("%s", e)
         return None
@@ -669,6 +716,37 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
     return reading
 
 
+def _reannotate_all() -> None:
+    """Re-process all existing raw snapshots and overwrite their annotated images."""
+    if not SNAPSHOT_DIR:
+        log.error("SNAPSHOT_DIR not configured — cannot reannotate")
+        return
+    raw_dir = os.path.join(SNAPSHOT_DIR, "raw")
+    ann_dir = os.path.join(SNAPSHOT_DIR, "annotated")
+    os.makedirs(ann_dir, exist_ok=True)
+    import glob as _glob
+    paths = sorted(_glob.glob(os.path.join(raw_dir, "*.jpg")))
+    if not paths:
+        log.info("No raw snapshots found in %s", raw_dir)
+        return
+    log.info("Reannotating %d snapshots …", len(paths))
+    ok = err = 0
+    for path in paths:
+        img = cv2.imread(path)
+        if img is None:
+            log.warning("Cannot read %s — skipped", path)
+            err += 1
+            continue
+        rotated    = rotate_image(img, ROTATE_DEG)
+        digital    = read_digital_digits(rotated)
+        raw_angles = read_analog_dials(rotated)
+        # No state/rollover for reannotation — show raw OCR as-is
+        out_path = os.path.join(ann_dir, os.path.basename(path))
+        cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
+        ok += 1
+    log.info("Reannotated %d images (%d errors)", ok, err)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Read water meter from camera.")
     ap.add_argument("--image",    help="Load from file instead of live camera")
@@ -682,10 +760,16 @@ def main() -> None:
                     help="Override last_reading baseline for this run (not allowed with --loop)")
     ap.add_argument("--push",         action="store_true",
                     help="Push result to HA even on a one-off run")
+    ap.add_argument("--reannotate",   action="store_true",
+                    help="Re-annotate all existing raw snapshots and exit")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.reannotate:
+        _reannotate_all()
+        sys.exit(0)
 
     if args.last_reading is not None and args.loop:
         ap.error("--last-reading cannot be used with --loop")
