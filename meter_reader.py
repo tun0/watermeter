@@ -541,19 +541,17 @@ def annotate(img: np.ndarray, digital: list[int | None],
                        int(cy - (r - 12) * math.cos(a)))
                 cv2.line(out, (cx, cy), tip, color, 2)
 
-        # Centre digit: dial_influenced_digit (what the pipeline uses)
-        # Color: cyan = matches corrected_digit; orange = dial influence changed it; dim = zero
+        # Centre: always show corrected_digit (raw needle → digit, no influence).
+        # When dial_influenced_digit differs, append "→N" in orange to show correction.
         if corr is not None:
             cd    = corrected_digit(corr)
             inf_d = dial_influenced_digit(i, raw_angles)
+            base_color = (0, 180, 180) if cd == 0 else (0, 220, 255)
+            cv2.putText(out, str(cd), (cx - 8, cy + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, base_color, 2)
             if inf_d != cd:
-                d_color = (0, 165, 255)  # orange: influence correction applied
-            elif inf_d == 0:
-                d_color = (0, 180, 180)  # dim cyan: zero
-            else:
-                d_color = (0, 220, 255)  # bright cyan: non-zero, unmodified
-            cv2.putText(out, str(inf_d), (cx - 8, cy + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, d_color, 2)
+                cv2.putText(out, f"→{inf_d}", (cx + 10, cy + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         else:
             cv2.putText(out, "?", (cx - 8, cy + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
