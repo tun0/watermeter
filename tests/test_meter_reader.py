@@ -17,8 +17,7 @@ import pytest
 
 import meter_reader as mr
 
-# Zero offsets loaded from conftest env (126, 270, 270, 0).
-Z = [126.0, 270.0, 270.0, 0.0]
+Z = mr.DIAL_ZERO_OFFSETS  # mirrors conftest env so raw-angle arithmetic stays relative
 
 
 # ── corrected_angle ───────────────────────────────────────────────────────────
@@ -51,7 +50,7 @@ def test_corrected_digit_wraps():
     assert mr.corrected_digit(360.0) == 0
 
 
-# ── dial_influenced_digit ─────────────────────────────────────────────────────
+# ── dial_corrected_digit ──────────────────────────────────────────────────────
 # Use zero_offsets = [0, 0, 0, 0] for simple cases by overriding the module attr.
 
 @pytest.fixture()
@@ -59,51 +58,48 @@ def zero_offsets(monkeypatch):
     monkeypatch.setattr(mr, "DIAL_ZERO_OFFSETS", [0.0, 0.0, 0.0, 0.0])
 
 
-def test_dial_influence_no_correction_mid(zero_offsets):
-    # A0 at digit 3 (108°), A1 at 180° (sub=0.5, mid-revolution) — no correction
-    angles = [108.0, 180.0, 180.0, 180.0]
-    assert mr.dial_influenced_digit(0, angles) == 3
+def test_dial_corrected_no_correction_mid(zero_offsets):
+    # A0 at digit 3, sub=0.5; driver A1 at expected_sub=0.5 — diff=0.0, no correction.
+    angles = [3 * 36 + 0.5 * 36, 180.0, 0.0, 0.0]
+    assert mr.dial_corrected_digit(0, angles) == 3
 
-def test_dial_influence_advance_when_both_confirm(zero_offsets):
-    # A0 sub_frac=0.94 (near upper boundary of digit 3), A1 corrected=18° (5% → below LOW=0.15)
-    # → should advance to digit 4
-    angles = [3 * 36 + 0.94 * 36, 18.0, 0.0, 0.0]
-    assert mr.dial_influenced_digit(0, angles) == 4
+def test_dial_corrected_advance_on_missed_crossing(zero_offsets):
+    # A0 reads digit 3, sub=0.98 — near end of digit 3.
+    # Driver A1 at expected_sub=0.02 — says A0 just entered a new digit.
+    # diff = 0.98 - 0.02 = 0.96 > 0.5 → advance to digit 4.
+    angles = [3 * 36 + 0.98 * 36, 0.02 * 360, 0.0, 0.0]
+    assert mr.dial_corrected_digit(0, angles) == 4
 
-def test_dial_influence_no_advance_when_driver_not_past_zero(zero_offsets):
-    # A0 sub_frac=0.94 but A1 corrected=300° (83% → above LOW) — driver hasn't passed zero
-    angles = [3 * 36 + 0.94 * 36, 300.0, 0.0, 0.0]
-    assert mr.dial_influenced_digit(0, angles) == 3
+def test_dial_corrected_retreat_on_early_crossing(zero_offsets):
+    # A0 reads digit 4, sub=0.02 — just crossed into digit 4.
+    # Driver A1 at expected_sub=0.98 — says A0 hasn't crossed yet.
+    # diff = 0.02 - 0.98 = -0.96 < -0.5 → retreat to digit 3.
+    angles = [4 * 36 + 0.02 * 36, 0.98 * 360, 0.0, 0.0]
+    assert mr.dial_corrected_digit(0, angles) == 3
 
-def test_dial_influence_retreat_when_both_confirm(zero_offsets):
-    # A0 sub_frac=0.05 (just crossed boundary into digit 4), A1 corrected=342° (95% → above HIGH)
-    # → driver hasn't completed revolution, A0 hasn't actually crossed → retreat to digit 3
-    angles = [4 * 36 + 0.05 * 36, 342.0, 0.0, 0.0]
-    assert mr.dial_influenced_digit(0, angles) == 3
+def test_dial_corrected_no_correction_near_boundary(zero_offsets):
+    # A0 at digit 3, sub=0.95; driver at expected_sub=0.93 — small diff=0.02, no correction.
+    angles = [3 * 36 + 0.95 * 36, 0.93 * 360, 0.0, 0.0]
+    assert mr.dial_corrected_digit(0, angles) == 3
 
-def test_dial_influence_no_retreat_when_driver_past_zero(zero_offsets):
-    # A0 sub_frac=0.05 but A1 corrected=20° (5.6% → below HIGH) — driver already past zero
-    angles = [4 * 36 + 0.05 * 36, 20.0, 0.0, 0.0]
-    assert mr.dial_influenced_digit(0, angles) == 4
+def test_dial_corrected_last_dial_no_driver(zero_offsets):
+    # A3 has no driver (index out of range) — returns raw digit unchanged.
+    angles = [0.0, 0.0, 0.0, 3 * 36 + 0.5 * 36]
+    assert mr.dial_corrected_digit(3, angles) == 3
 
-def test_dial_influence_last_dial_no_driver(zero_offsets):
-    # A3 has no driver (index 4 out of range) — returns direct digit
-    angles = [0.0, 0.0, 0.0, 108.0]
-    assert mr.dial_influenced_digit(3, angles) == 3
-
-def test_dial_influence_none_raw_returns_zero(zero_offsets):
+def test_dial_corrected_none_raw_returns_zero(zero_offsets):
     angles = [None, 180.0, 180.0, 180.0]
-    assert mr.dial_influenced_digit(0, angles) == 0
+    assert mr.dial_corrected_digit(0, angles) == 0
 
-def test_dial_influence_none_driver_no_correction(zero_offsets):
-    # Driver is None → no correction, return direct digit
-    angles = [3 * 36 + 0.94 * 36, None, 0.0, 0.0]
-    assert mr.dial_influenced_digit(0, angles) == 3
+def test_dial_corrected_none_driver_no_correction(zero_offsets):
+    # Driver is None — no cross-check possible, trust camera reading.
+    angles = [3 * 36 + 0.98 * 36, None, 0.0, 0.0]
+    assert mr.dial_corrected_digit(0, angles) == 3
 
-def test_dial_influence_cascade_a1_uses_a2(zero_offsets):
-    # Cascade: A1 boundary correction driven by A2
-    angles = [180.0, 2 * 36 + 0.94 * 36, 18.0, 0.0]
-    assert mr.dial_influenced_digit(1, angles) == 3
+def test_dial_corrected_cascade_a1_uses_a2(zero_offsets):
+    # A1 reads digit 2, sub=0.98; A2 at expected_sub=0.02 → advance A1 to digit 3.
+    angles = [0.0, 2 * 36 + 0.98 * 36, 0.02 * 360, 0.0]
+    assert mr.dial_corrected_digit(1, angles) == 3
 
 
 # ── assemble_reading ──────────────────────────────────────────────────────────
@@ -129,20 +125,17 @@ def test_assemble_reading_fractional():
     reading = mr.assemble_reading([0, 0, 0, 0, 0], raw)
     assert reading == pytest.approx(0.1, abs=1e-4)
 
-def test_assemble_reading_carry_from_inner_dial_advance():
-    # A1 is at digit 9, sub=0.96 (> DIAL_INFLUENCE_HIGH): dial_influenced_digit advances it to 0.
-    # A2 is near angle 0 (driver_sub=0.003 < DIAL_INFLUENCE_LOW): this is what triggers the advance.
-    # A0 is at digit 5, sub=0.5: its own advance condition does NOT fire (sub < DIAL_INFLUENCE_HIGH).
-    #
-    # Without carry propagation: reading = 310.5006 (A1 drops 9→0, A0 stays at 5).
-    # With carry propagation:    reading = 310.6006 (A1 advance carries into A0: 5→6).
+def test_assemble_reading_inter_dial_correction():
+    # A1 at digit 9, sub=0.98; A2 at expected_sub=0.02 → dial_corrected_digit advances A1 to 0.
+    # A0 at digit 5, sub=0.5; A1 after correction is 0 (expected_sub=0.0) → A0 not corrected.
+    # Result: A0=5, A1=0, A2=0 (corrected by A3), A3=4 → fractional = 0.5004.
     raw = [
-        Z[0] + 5.5 * 36,   # A0: corrected=198°, digit=5, sub=0.5
-        Z[1] + 9.96 * 36,  # A1: corrected=358.56°, digit=9, sub=0.96 → will be advanced to 0
-        Z[2] + 1.0,         # A2: corrected=1°, digit=0, driver_sub=0.003 → triggers A1 advance
-        Z[3] + 6.0 * 36,   # A3: corrected=216°, digit=6
+        Z[0] + 5.5 * 36,    # A0: digit=5, sub=0.5; A1 corrected to 0 → expected_sub=0.0, diff=0.5 → no change
+        Z[1] + 9.98 * 36,   # A1: digit=9, sub=0.98; driver A2 expected_sub=0.02 → diff=0.96 → advance to 0
+        Z[2] + 0.02 * 360,  # A2: corrected=7.2°, digit=0 — drives A1 correction above
+        Z[3] + 4.0 * 36,    # A3: digit=4
     ]
-    assert mr.assemble_reading([0, 0, 3, 1, 0], raw) == pytest.approx(310.6006, abs=1e-4)
+    assert mr.assemble_reading([0, 0, 3, 1, 0], raw) == pytest.approx(310.5004, abs=1e-4)
 
 
 # ── corrected_fraction ────────────────────────────────────────────────────────
@@ -154,7 +147,7 @@ def test_corrected_fraction_none_returns_none():
     assert mr.corrected_fraction([None, Z[1], Z[2], Z[3]]) is None
 
 def test_corrected_fraction_9000():
-    # A0 corrected digit 9 (raw = Z[0] + 9*36 = 126+324=450 % 360 = 90)
+    # A0 corrected digit 9 (raw = Z[0] + 9*36)
     # A1,A2,A3 at zero → digits 0
     raw = [Z[0] + 9 * 36, Z[1], Z[2], Z[3]]
     assert mr.corrected_fraction(raw) == pytest.approx(0.9, abs=1e-4)
@@ -320,28 +313,17 @@ def test_validate_at_max_delta_cap_is_rejected():
     assert "cap" in reason
 
 
-# ── corrected_fraction_exit ───────────────────────────────────────────────────
-
-def test_corrected_fraction_exit_stable_near_boundary():
-    # A0 at digit 9, sub=0.96: dial_influenced_digit (used by corrected_fraction)
-    # advances A0 to 0, dropping the fraction to ~0.0.
-    # corrected_fraction_exit uses corrected_digit only — A0 stays at 9 → 0.9.
-    a0_near_boundary = Z[0] + 9.96 * 36  # corrected=358.56°, digit=9, sub=0.96
-    a1_at_zero       = Z[1]              # corrected=0°, driver_sub=0 → triggers advance
-    raw = [a0_near_boundary, a1_at_zero, Z[2], Z[3]]
-    assert mr.corrected_fraction(raw)      == pytest.approx(0.0, abs=1e-4)
-    assert mr.corrected_fraction_exit(raw) == pytest.approx(0.9, abs=1e-4)
-
-def test_rollover_complete_does_not_fire_on_premature_fraction_advance():
-    # A0 sub=0.96 near 9→0: dial_influenced_digit advances A0 prematurely,
-    # making corrected_fraction < ROLLOVER_START while A0 hasn't physically crossed.
-    # With last_frac >= ROLLOVER_START the "complete" branch must NOT fire.
-    a0_near_boundary = Z[0] + 9.96 * 36
-    a1_at_zero       = Z[1]
+def test_rollover_complete_fires_when_driver_confirms_crossing():
+    # A0 at digit 9, sub=0.96; A1 at 0° (expected_sub=0.0).
+    # A1 at the start of its revolution means A0 just crossed into digit 0.
+    # The inter-dial correction advances A0 to 0 → corrected_fraction drops to ~0.0
+    # → rollover-complete fires, incrementing D4 from 0 to 1.
+    a0_near_boundary = Z[0] + 9.96 * 36   # digit=9, sub=0.96
+    a1_at_zero       = Z[1]               # expected_sub=0.0 → diff=0.96 → advance A0 to 0
     angles = [a0_near_boundary, a1_at_zero, Z[2], Z[3]]
-    state  = {"last_reading": 310.9853}   # last_frac=0.9853 >= ROLLOVER_START
+    state  = {"last_reading": 310.9853}    # last_frac=0.9853 >= ROLLOVER_START
     result = mr.rollover_coverage([0, 0, 3, 1, 0], angles, state)
-    assert result == [0, 0, 3, 1, 0]     # no spurious advance to 311
+    assert result == [0, 0, 3, 1, 1]       # D4 advanced: reading becomes 311.x
 
 
 # ── .env.dist completeness ────────────────────────────────────────────────────

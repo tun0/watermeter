@@ -102,10 +102,6 @@ ANALOG_DIALS   = _parse_dial_list(_env("ANALOG_DIALS"))
 # Dial calibration — physical zero offsets (degrees), order A0..A3
 DIAL_ZERO_OFFSETS = _parse_floats(_env("DIAL_ZERO_OFFSETS"))
 
-# Dial influence thresholds (fraction 0.0–1.0)
-DIAL_INFLUENCE_HIGH = float(_env("DIAL_INFLUENCE_HIGH"))
-DIAL_INFLUENCE_LOW  = float(_env("DIAL_INFLUENCE_LOW"))
-
 # Rollover: corrected_fraction >= ROLLOVER_START means digit drum is transitioning
 ROLLOVER_START = float(_env("ROLLOVER_START"))
 
@@ -298,38 +294,50 @@ def corrected_digit(corr: float) -> int:
     return int(corr / 36.0) % 10
 
 
-# ── Dial influence correction ──────────────────────────────────────────────────
+# ── Inter-dial correction ──────────────────────────────────────────────────────
+#
+# The gear relationship: A(n+1) drives A(n) at a 10:1 ratio, so every full
+# revolution of A(n+1) advances A(n) by exactly one digit. This means
+# A(n+1)'s position within its own revolution directly predicts how far A(n)
+# should be within its current digit:
+#
+#   expected_sub = corrected_angle(n+1) / 360
+#
+# Both values are in [0.0, 1.0). In normal operation they match closely.
+# When they differ by more than 0.5, the camera has almost certainly read the
+# wrong digit for A(n) — the driver is more reliable. Pick the adjacent digit
+# that is consistent with the driver.
 
-def dial_influenced_digit(n: int, raw_angles: list[float | None]) -> int:
-    """
-    Digit for dial n, with boundary ambiguity resolved using dial n+1.
-
-    Reads as (k+1) % 10 only when BOTH:
-      sub_frac(n)          > DIAL_INFLUENCE_HIGH  — n is near its upper boundary
-      corrected(n+1) / 360 < DIAL_INFLUENCE_LOW   — n+1 just passed 0 (just drove n)
-
-    Reads as (k-1) % 10 only when BOTH:
-      sub_frac(n)          < DIAL_INFLUENCE_LOW   — n just crossed a boundary
-      corrected(n+1) / 360 > DIAL_INFLUENCE_HIGH  — n+1 hasn't completed its revolution
-    """
+def dial_corrected_digit(n: int, raw_angles: list[float | None]) -> int:
+    """Return the best digit for dial n, cross-checked against the driver dial n+1."""
     raw = raw_angles[n]
     if raw is None:
         return 0
 
     corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[n])
-    pos  = corr / 36.0
-    k    = int(pos) % 10
-    sub  = pos % 1.0
+    k    = int(corr / 36.0) % 10   # digit from camera (0–9)
+    sub  = (corr / 36.0) % 1.0     # how far into that digit (0.0 = just entered, 1.0 = about to leave)
 
+    # Without a driver we have no cross-check, so trust the camera reading.
     if n + 1 >= len(raw_angles) or raw_angles[n + 1] is None:
         return k
 
-    driver_corr = corrected_angle(raw_angles[n + 1], DIAL_ZERO_OFFSETS[n + 1])
-    driver_sub  = driver_corr / 360.0
+    # expected_sub: where the driver says A(n) should be within its digit.
+    driver_corr  = corrected_angle(raw_angles[n + 1], DIAL_ZERO_OFFSETS[n + 1])
+    expected_sub = driver_corr / 360.0
 
-    if sub > DIAL_INFLUENCE_HIGH and driver_sub < DIAL_INFLUENCE_LOW:
+    # diff > 0 means the camera placed A(n) further along its digit than the driver expects.
+    # diff < 0 means the camera placed A(n) earlier than expected.
+    diff = sub - expected_sub
+
+    if diff > 0.5:
+        # Camera sees A(n) near the END of digit k, but driver says it should be near the
+        # START of its digit. This means A(n) just crossed into a new digit and the camera
+        # missed it — the correct digit is k+1.
         return (k + 1) % 10
-    if sub < DIAL_INFLUENCE_LOW and driver_sub > DIAL_INFLUENCE_HIGH:
+    if diff < -0.5:
+        # Camera sees A(n) near the START of digit k, but driver says it should be near the
+        # END of its digit. This means A(n) hasn't crossed yet — the correct digit is k-1.
         return (k - 1 + 10) % 10
     return k
 
@@ -345,47 +353,20 @@ def assemble_reading(digital: list[int | None],
 
     integer_part = int("".join(str(d) for d in digital))
     n            = len(raw_angles)
-    influenced   = [dial_influenced_digit(i, raw_angles) for i in range(n)]
-    raw_corr     = [corrected_digit(corrected_angle(raw_angles[i], DIAL_ZERO_OFFSETS[i]))
-                    for i in range(n)]
-    digits       = list(influenced)
-
-    # dial_influenced_digit detects "A(i+1) just drove A(i)" by looking at A(i+1)'s angle.
-    # But dial_influenced_digit for A(i-1) still sees A(i)'s physical angle (near 354°),
-    # so it won't fire even though A(i) logically crossed. Propagate the carry manually:
-    # if dial i advanced (9→0) and dial i-1 didn't advance on its own, increment i-1.
-    for i in range(n - 1, 0, -1):
-        if influenced[i] == 0 and raw_corr[i] == 9:
-            if not (influenced[i - 1] == 0 and raw_corr[i - 1] == 9):
-                digits[i - 1] = (digits[i - 1] + 1) % 10
-
-    fractional = sum(d * 10 ** -(i + 1) for i, d in enumerate(digits))
+    # Each dial is corrected independently using its own driver — no carry propagation needed.
+    digits       = [dial_corrected_digit(i, raw_angles) for i in range(n)]
+    fractional   = sum(d * 10 ** -(i + 1) for i, d in enumerate(digits))
     return round(integer_part + fractional, 4)
 
 
 # ── Rollover coverage ──────────────────────────────────────────────────────────
 
 def corrected_fraction(raw_angles: list[float | None]) -> float | None:
-    """Fractional reading using the same boundary-corrected logic as assemble_reading."""
+    """Analog fraction A0/10 + A1/100 + A2/1000 + A3/10000, with inter-dial correction."""
     if any(a is None for a in raw_angles):
         return None
     total = sum(
-        dial_influenced_digit(i, raw_angles) * 10 ** -(i + 1)
-        for i in range(len(raw_angles))
-    )
-    return round(total, 4)
-
-
-def corrected_fraction_exit(raw_angles: list[float | None]) -> float | None:
-    """Stable fraction for rollover-exit detection; uses corrected_digit only.
-
-    Unlike corrected_fraction, does not apply dial influence — so it only drops
-    below ROLLOVER_START when A0 has physically crossed the boundary, not when
-    dial_influenced_digit prematurely advances A0 at the 9→0 threshold."""
-    if any(a is None for a in raw_angles):
-        return None
-    total = sum(
-        corrected_digit(corrected_angle(raw_angles[i], DIAL_ZERO_OFFSETS[i])) * 10 ** -(i + 1)
+        dial_corrected_digit(i, raw_angles) * 10 ** -(i + 1)
         for i in range(len(raw_angles))
     )
     return round(total, 4)
@@ -405,9 +386,8 @@ def rollover_coverage(digital: list[int | None],
 
     During transition → force to 9.  After transition → force to 0.
     """
-    frac      = corrected_fraction(raw_angles)
-    frac_exit = corrected_fraction_exit(raw_angles)
-    if frac is None or frac_exit is None:
+    frac = corrected_fraction(raw_angles)
+    if frac is None:
         return digital
 
     last = state.get("last_reading")
@@ -433,10 +413,8 @@ def rollover_coverage(digital: list[int | None],
             result[pos] = last_digs[pos]
         if corrected:
             log.info("rollover: in progress frac=%.4f, corrected digits %s → old", frac, corrected)
-    elif last_frac >= ROLLOVER_START and frac_exit < ROLLOVER_START:
-        # Use frac_exit (corrected_digit only) to confirm A0 physically crossed.
-        # frac alone can drop below ROLLOVER_START prematurely when dial_influenced_digit
-        # advances A0 at the 9→0 threshold before A0's angle actually crosses.
+    elif last_frac >= ROLLOVER_START:
+        # frac dropped below ROLLOVER_START — A0 completed its revolution (confirmed by driver).
         for pos in transitioning:
             result[pos] = (last_digs[pos] + 1) % 10
         log.info("rollover: complete frac=%.4f (was %.4f), forcing digits %s → new",
@@ -542,16 +520,16 @@ def annotate(img: np.ndarray, digital: list[int | None],
                    int(cy - (r - 12) * math.cos(a)))
             cv2.line(out, (cx, cy), tip, (0, 200, 255), 2)
 
-        # Centre: always show corrected_digit (raw needle → digit, no influence).
-        # When dial_influenced_digit differs, append "→N" in orange to show correction.
+        # Centre: always show corrected_digit (raw camera reading).
+        # When dial_corrected_digit differs, append "→N" in orange to show the correction.
         if corr is not None:
-            cd    = corrected_digit(corr)
-            inf_d = dial_influenced_digit(i, raw_angles)
+            cd     = corrected_digit(corr)
+            corr_d = dial_corrected_digit(i, raw_angles)
             base_color = (0, 180, 180) if cd == 0 else (0, 220, 255)
             cv2.putText(out, str(cd), (cx - 8, cy + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, base_color, 2)
-            if inf_d != cd:
-                cv2.putText(out, f">{inf_d}", (cx + 10, cy + 5),
+            if corr_d != cd:
+                cv2.putText(out, f">{corr_d}", (cx + 10, cy + 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
         else:
             cv2.putText(out, "?", (cx - 8, cy + 5),

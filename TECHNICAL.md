@@ -17,175 +17,127 @@ Gear relationship: every time A(n+1) completes one full revolution (360°),
 A(n) advances by exactly one digit (36°). All digits and dials are physically
 interconnected. Each full revolution of A0 increments D4 by 1.
 
-Dial markings on A0, A1 and A2 cannot be trusted — their mounting angle is
-arbitrary, so raw angles carry no absolute meaning. A3 is the exception: its
-markings can be treated as absolute.
+The dial markings on all four dials are unreliable — their mounting angle is
+arbitrary and each must be individually calibrated.
 
 
 Calibration
 -----------
 
-Because A0, A1 and A2 markings are unreliable, each must be calibrated to a
-known zero position. A "corrected angle" is the raw angle adjusted by the
-dial's calibrated zero offset. All fractions and digit interpretations below
-are computed from corrected angles.
+Each dial has a zero_offset: the raw needle angle at which that dial reads
+digit 0. All digit computation starts from the corrected angle:
 
-A3 requires no calibration.
+  corrected_angle = (raw_angle - zero_offset) % 360
+  digit           = int(corrected_angle / 36) % 10
+
+Calibrated zero offsets:
+  A0: 132°   (refined from 310→311 rollover observation, 2026-06-29)
+  A1: 270°
+  A2: 270°
+  A3:   0°
+
+Offsets are determined empirically by observing rollover events: the offset
+is the raw needle angle at which the digit boundary aligns with the display
+incrementing.
+
+A3's offset matters: its corrected angle is used to improve the digit
+reading of A2 (see Inter-dial correction below).
+
+
+Reading assembly
+----------------
+
+  reading = digital_integer + A0/10 + A1/100 + A2/1000 + A3/10000
+
+The digital integer comes from OCR of the five digit drums. A0–A3 are the
+corrected digits from the analog dials.
+
+The analog fraction (right-hand side) is the authoritative source during
+rollover windows when the digit drums are in motion and OCR is unreliable.
+
+
+Inter-dial correction
+---------------------
+
+The gear relationship gives a continuous prediction: because A(n+1) drives
+A(n) at a 10:1 ratio, A(n+1)'s position within its current revolution
+directly predicts where A(n) should be within its current digit:
+
+  expected_sub(n) = corrected_angle(n+1) / 360
+
+where sub (0.0–1.0) is the fractional position within a digit.
+
+Camera-based needle detection has noise. When the expected and observed
+sub-positions for A(n) disagree significantly, A(n+1) is the more reliable
+source — it spans a much larger arc per unit of A(n)'s digit. Use the
+expected sub to select the digit nearest to A(n)'s raw observation.
+
+This handles detection noise at any point in the dial's rotation, not just
+near digit boundaries.
+
+Gear phase: the phase offset is the corrected angle of A(n+1) at the moment
+A(n) crosses a digit boundary. Empirically confirmed for this meter: the
+phase offset is approximately 0° for all dial pairs (A(n) crosses when
+A(n+1) is near 0° corrected). No phase correction is therefore needed.
 
 
 Rollover
 --------
 
-Each increment of D4 (e.g. N → N+1) is accompanied by one full revolution of
-A0. During this revolution, the digit drum transitions mechanically and the
-digital display becomes temporarily illegible.
+When D4 increments (e.g. 310→311), A0 completes one full revolution and the
+digit drum is temporarily illegible. The same applies to D3, D2, D1, D0 for
+cascade rollovers (e.g. 299→300).
 
-  Rollover transition starts: corrected fraction = .9000  (A0 physically at ≈ 90°, showing corrected digit 9)
-  Rollover transition ends:   corrected fraction = .0000
+Detection uses the analog fraction F = A0/10 + A1/100 + A2/1000 + A3/10000:
 
-During the window, A0 advances exactly 36° (one digit, 9 → 0) and A1 completes
-exactly one full revolution, returning to the same physical position it started at.
+  In progress  (F ≥ ROLLOVER_START, typically 0.9):
+    The drum is in transition. The OCR integer is locked to the last accepted
+    value; the analog fraction continues to advance normally.
 
-Assumption: all rollovers behave identically.
+  Complete  (F drops from ≥ ROLLOVER_START to below it):
+    A0 has physically crossed digit 0. The OCR integer is incremented by 1.
 
-
-Empirical observations
-----------------------
-
-Confirmed on rollovers 295→296, 299→300 and 306→307:
-
-  Rollover start: A0 raw ≈  90°,  A1 raw ≈ 270°,  A2 raw ≈ 266°
-  Rollover end:   A0 raw ≈ 127°,  A1 raw ≈ 270°,  A2 raw ≈ 266°
-
-Zero offsets (physical properties of the meter dials):
-  A0 zero_offset = 126°
-  A1 zero_offset = 270°
-  A2 zero_offset = 270°
-
-Measured values are within a few degrees of these. The clean numbers are
-intentional: this is a refurbished meter with physically displaced dials, and
-small deviations from the true mechanical zero are acceptable because the
-dial influence from less-significant dials shifts detection zones accordingly.
+For cascade rollovers, any digit position that held 9 in the last accepted
+reading is also treated as transitioning.
 
 
-Dial influence
---------------
-
-The corrected value of A(n) shifts the digit interpretation boundary of A(n-1).
-This accounts for mechanical play in the gear train.
-
-Example (all angles corrected):
-  A3 at   0° → A2 corrected angles  18° –  40° map to digit 1
-  A3 at 180° → A2 corrected angles  32° –  64° map to digit 1
-
-
-Safeguards
+Validation
 ----------
 
-Readings are validated against the previous sample before being accepted.
+Each reading is validated against the previous accepted value before being
+published.
 
-Primary rate limit: the meter reading must not increase by more than 0.05 m³
-per 10-second interval. This reflects the maximum realistic flow rate.
+  Increases up to MAX_STEP per reading interval are accepted. For gaps longer
+  than one interval the limit scales with elapsed time, capped at MAX_DELTA_CAP.
 
-If snapshots were missed (gap > 10s between samples), the limit scales linearly
-with elapsed time:
+  Decreases within JITTER_TOLERANCE are accepted (dials can settle slightly
+  backward after flow stops). Larger decreases are rejected as errors.
 
-  max_delta = RATE_LIMIT_PER_INTERVAL * (elapsed_seconds / INTERVAL_SECONDS)
+  Readings outside these bounds are dropped; the previous value is retained
+  and the event is logged.
 
-This scaled delta is capped by a secondary maximum to avoid accepting arbitrarily
-large jumps after long outages:
-
-  max_delta = min(max_delta, MAX_DELTA_CAP)
-
-Both the per-interval rate limit (0.05 m³) and the secondary cap are configured
-values, not hard-coded. The cap can be expressed as either a maximum value
-difference or a maximum time gap (whichever is more intuitive — the implementation
-should support at least one).
-
-A reading that exceeds the allowed delta is rejected; the previous reading is
-retained and the event is logged.
-
-Small decreases are accepted: analog dials can settle slightly backward after
-flow stops, producing readings a few millilitres below the previous value.
-Decreases within a configured jitter tolerance are accepted and reported as
-zero flow. Larger decreases are rejected as errors.
-
-State persists two fields across samples: last_reading (the last accepted
-value) and last_reading_ts (its Unix timestamp). Both are required for the
-scaled delta check and flow rate calculation.
+State persists two fields: last_reading and last_reading_ts (Unix timestamp).
+Both are required for the scaled delta check and flow rate calculation.
 
 
 Goals
 -----
 
-1. Flow rate accuracy is the primary concern; absolute reading accuracy is secondary.
-2. Cover the illegibility gap during every digit rollover (D4, D3, D2, D1, D0).
-3. During the gap, use analog dial positions to infer the correct digit value.
+1. Flow rate accuracy is the primary concern; absolute accuracy is secondary.
+2. Cover the illegibility gap during every digit rollover (D4 through D0).
+3. During the gap, use analog dial positions to infer the correct integer value.
 
 
-Implementation plan
--------------------
+Configuration
+-------------
 
-General: all tunable parameters (zero offsets, crop coordinates, dial regions,
-rate limits, thresholds) live in configuration, not in logic code. Logic code
-only contains algorithms.
+All tunable parameters are supplied via environment variables. .env.dist is
+the canonical reference with all defaults documented.
 
-Configuration is supplied via environment variables. .env.dist is the canonical
-reference. Two categories:
+  Site-specific (no defaults):  CAM_SNAPSHOT_URL, HA_URL, HA_TOKEN
+  Shared defaults:               DIAL_ZERO_OFFSETS, ROLLOVER_START,
+                                 READING_INTERVAL, MAX_STEP, MAX_DELTA_CAP,
+                                 JITTER_TOLERANCE
 
-  Required with defaults: variables that have sensible shared defaults (dial
-  offsets, thresholds, intervals). .env.dist lists the actual default values.
-  The script fails explicitly at startup if they are absent.
-
-  Required without defaults: variables that are inherently site-specific (camera
-  URL, HA token). .env.dist provides a commented-out dummy value as a reminder.
-  The script fails explicitly at startup if absent.
-
-The script never provides hardcoded fallbacks — absence always means failure.
-
-Test coverage is required for all logic: corrected angle primitives, dial
-influence (including boundary and cascade cases), rollover detection, and
-safeguard validation. Configuration-dependent behaviour must be testable by
-injecting values directly without relying on environment variables in tests.
-Tests must also verify that supplying the default values from .env.dist (plus
-any required site-specific vars) is sufficient for the script to initialise
-correctly — ensuring .env.dist is always complete and accurate.
-
-Step 1 — Corrected angle primitives                                  [DONE]
-  DIAL_ZERO_OFFSETS config value (env var).
-  corrected_angle(raw, zero_offset) → (raw - zero_offset) % 360
-  corrected_digit(corrected_angle) → int(corrected_angle / 36) % 10
-
-Step 2 — Rewrite assemble_reading                                    [DONE]
-  Uses corrected digits from step 1 instead of raw angles.
-  Removed DIAL_PHASE_CORRECTION and old rounding helpers.
-
-Step 3 — Implement dial influence                                     [DONE]
-  Replaced correct_gear_lash with dial_influenced_digit(n, raw_angles).
-  The rule: A(n) reads as (k+1)%10 only if sub_frac(n) > DIAL_INFLUENCE_HIGH
-  AND corrected(n+1)/360 < DIAL_INFLUENCE_LOW (driver just passed 0).
-  Symmetric rule prevents premature crossing detection.
-
-Step 4 — Implement rollover coverage                                  [DONE]
-  Replaced _apply_rollover_bridge, resolve_rollover, calibrate_from_rollover
-  with rollover_coverage(digital, raw_angles, state).
-  Transitioning positions: D4 always; D3/D2/... cascade only if ALL
-  less-significant positions held 9 (causing a carry into this position).
-  During rollover: force to old value (last_digs[pos]).
-  After rollover: force to new value ((last_digs[pos]+1) % 10).
-
-Step 5 — Implement scaled safeguards                                  [DONE]
-  validate() scales allowed delta by elapsed time, capped at MAX_DELTA_CAP.
-  Jitter tolerance allows small backward movement.
-  All thresholds are configured values (env vars).
-
-Step 6 — Clean up + config externalisation                           [DONE]
-  All tunable values moved to environment variables; no hardcoded fallbacks.
-  Canonical defaults documented in .env.dist.
-  Removed dead code: DIAL_PHASE_CORRECTION, ROLLOVER_BRIDGE_THRESHOLD,
-  gear-lash constants, calibrate_from_rollover, resolve_rollover,
-  _apply_rollover_bridge, dial_zero_offsets state field.
-
-Step 7 — Test suite                                                   [DONE]
-  48 tests covering all logic functions, rollover cascade cases, scaled
-  safeguards, and .env.dist completeness verification.
+Logic code contains only algorithms; no hardcoded fallbacks. Absent required
+variables cause an explicit failure at startup.
