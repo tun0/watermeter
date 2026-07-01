@@ -117,13 +117,18 @@ const INIT_END   = "/*INIT_END*/";
 function parseTs(f) {
   const d=f.slice(0,8), t=f.slice(9,15);
   return new Date(d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)+'T'+
-                  t.slice(0,2)+':'+t.slice(2,4)+':'+t.slice(4,6));
+                  t.slice(0,2)+':'+t.slice(2,4)+':'+t.slice(4,6)+'Z');
 }
 function toInput(d) {
   return new Date(d-d.getTimezoneOffset()*60000).toISOString().slice(0,16);
 }
-// datetime-local value → YYYYMMDD_HHMMSS
-function toTs(v) { return v.replace(/-/g,'').replace('T','_').replace(':','')+'00'; }
+// datetime-local value (local time) → YYYYMMDD_HHMMSS in UTC (matches filenames)
+function toTs(v) {
+  const d=new Date(v);
+  const P=n=>String(n).padStart(2,'0');
+  return String(d.getUTCFullYear())+P(d.getUTCMonth()+1)+P(d.getUTCDate())+'_'+
+         P(d.getUTCHours())+P(d.getUTCMinutes())+P(d.getUTCSeconds());
+}
 
 function imgPath(f) {
   return '/img/'+(document.getElementById('ann').checked?'annotated':'raw')+'/'+f;
@@ -250,8 +255,8 @@ function go() {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 const _qs = new URLSearchParams(location.search);
-document.getElementById('start').value=INIT_START;
-document.getElementById('end').value=INIT_END;
+document.getElementById('start').value=toInput(new Date(INIT_START+'Z'));
+document.getElementById('end').value=toInput(new Date(INIT_END+'Z'));
 if (_qs.has('ann')) document.getElementById('ann').checked = _qs.get('ann') !== '0';
 
 buildGrid();
