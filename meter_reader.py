@@ -650,7 +650,8 @@ def _save_snapshot(raw: bytes, img: np.ndarray, digital: list[int | None],
         f.write(raw)
     rotated = rotate_image(img, ROTATE_DEG)
     cv2.imwrite(os.path.join(ann_dir, f"{ts}.jpg"),
-                annotate(rotated, digital, raw_angles, ocr_digital))
+                annotate(rotated, digital, raw_angles, ocr_digital),
+                [cv2.IMWRITE_JPEG_QUALITY, 80])
     _snapshot_count += 1
     if _snapshot_count % 360 == 0:
         _prune_snapshots()
@@ -665,10 +666,18 @@ def _prune_snapshots() -> None:
         path = os.path.join(SNAPSHOT_DIR, subdir)
         try:
             for entry in os.scandir(path):
-                if entry.is_file() and entry.name.endswith(".jpg"):
-                    if entry.stat().st_mtime < cutoff:
-                        os.unlink(entry.path)
-                        pruned += 1
+                if not (entry.is_file() and entry.name.endswith(".jpg")):
+                    continue
+                # Use the timestamp in the filename (YYYYMMDD_HHMMSS) rather than
+                # st_mtime — reannotate rewrites annotated files, which would refresh
+                # mtime and prevent them from ever being pruned.
+                try:
+                    file_ts = datetime.strptime(entry.name[:15], "%Y%m%d_%H%M%S").timestamp()
+                except ValueError:
+                    file_ts = entry.stat().st_mtime
+                if file_ts < cutoff:
+                    os.unlink(entry.path)
+                    pruned += 1
         except OSError:
             pass
     if pruned:
@@ -738,7 +747,8 @@ def _reannotate_one(raw_path: str) -> None:
     rotated    = rotate_image(img, ROTATE_DEG)
     digital    = read_digital_digits(rotated)
     raw_angles = read_analog_dials(rotated)
-    cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
+    cv2.imwrite(out_path, annotate(rotated, digital, raw_angles),
+                [cv2.IMWRITE_JPEG_QUALITY, 80])
     print(f"Annotated: {os.path.realpath(out_path)}", flush=True)
 
 
@@ -768,7 +778,8 @@ def _reannotate_all() -> None:
             digital    = read_digital_digits(rotated)
             raw_angles = read_analog_dials(rotated)
             out_path   = os.path.join(ann_dir, os.path.basename(path))
-            cv2.imwrite(out_path, annotate(rotated, digital, raw_angles))
+            cv2.imwrite(out_path, annotate(rotated, digital, raw_angles),
+                        [cv2.IMWRITE_JPEG_QUALITY, 80])
             ok += 1
         done = ok + err
         pct  = done * 100 // total
