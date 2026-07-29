@@ -592,19 +592,20 @@ def process(img: np.ndarray, debug: bool = False,
     rotated    = rotate_image(img, ROTATE_DEG)
     last_int   = int(state["last_reading"]) if state and "last_reading" in state else None
     digital    = read_digital_digits(rotated, last_int=last_int)
-    raw_angles = read_analog_dials(rotated)
-    ocr_digital = list(digital)  # snapshot before rollover correction
+    raw_angles    = read_analog_dials(rotated)
+    active_angles = raw_angles[:3]  # A3 excluded: detection too noisy to be useful
+    ocr_digital   = list(digital)  # snapshot before rollover correction
 
     if state:
-        digital = rollover_coverage(digital, raw_angles, state)
+        digital = rollover_coverage(digital, active_angles, state)
 
-    reading = assemble_reading(digital, raw_angles)
+    reading = assemble_reading(digital, active_angles)
 
     log.debug("digital=%s  raw_angles=%s  corrected_digits=%s  reading=%.4f",
               digital,
-              [f"{a:.1f}" if a is not None else "None" for a in raw_angles],
+              [f"{a:.1f}" if a is not None else "None" for a in active_angles],
               [corrected_digit(corrected_angle(a, DIAL_ZERO_OFFSETS[i]))
-               if a is not None else "?" for i, a in enumerate(raw_angles)],
+               if a is not None else "?" for i, a in enumerate(active_angles)],
               reading)
 
     if debug:
