@@ -472,11 +472,13 @@ def _clear_pending(state: dict) -> None:
 
 
 def _accept(new_val: float, state: dict) -> tuple[bool, str]:
-    """validate(), plus confirmation of jumps above MAX_STEP.
+    """validate(), plus confirmation of jumps above MAX_STEP and of decreases
+    beyond JITTER_TOLERANCE (down to -MAX_STEP).
 
-    A jump is accepted once CONFIRM_COUNT consecutive readings agree within
-    CONFIRM_TOLERANCE. Dial misreads flicker between modes and never agree for
-    that long; real consumption after a gap does. Mutates the pending_* keys.
+    Such a change is accepted once CONFIRM_COUNT consecutive readings agree
+    within CONFIRM_TOLERANCE. Dial misreads flicker between modes and never
+    agree for that long; real consumption after a gap does, and so does a state
+    that sits slightly above the dials. Mutates the pending_* keys.
     """
     ok, reason = validate(new_val, state)
     if ok:
@@ -484,7 +486,8 @@ def _accept(new_val: float, state: dict) -> tuple[bool, str]:
         return True, reason
 
     delta = new_val - state["last_reading"]
-    if not MAX_STEP < delta < MAX_DELTA_CAP:
+    if not (MAX_STEP < delta < MAX_DELTA_CAP
+            or -MAX_STEP <= delta < -JITTER_TOLERANCE):
         _clear_pending(state)
         return False, reason
 
@@ -495,7 +498,7 @@ def _accept(new_val: float, state: dict) -> tuple[bool, str]:
         count = 1
     if count >= CONFIRM_COUNT:
         _clear_pending(state)
-        return True, f"confirmed jump {delta:+.4f} after {count} agreeing reads"
+        return True, f"confirmed change {delta:+.4f} after {count} agreeing reads"
     state["pending_reading"] = new_val
     state["pending_count"] = count
     return False, f"{reason} (pending {count}/{CONFIRM_COUNT})"

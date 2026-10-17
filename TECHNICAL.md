@@ -110,7 +110,9 @@ published.
   Increases up to MAX_STEP per reading are accepted, regardless of how long
   ago the last accepted reading was. A larger increase (below MAX_DELTA_CAP) is
   accepted only once CONFIRM_COUNT consecutive readings agree within
-  CONFIRM_TOLERANCE; a flickering dial misread never does.
+  CONFIRM_TOLERANCE; a flickering dial misread never does. The same rule lets a
+  decrease of up to MAX_STEP through, so a state that sits slightly above the
+  dials corrects itself instead of rejecting every reading.
 
   Decreases within JITTER_TOLERANCE are accepted (dials can settle slightly
   backward after flow stops). Larger decreases are rejected as errors.

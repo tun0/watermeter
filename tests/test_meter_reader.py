@@ -365,6 +365,31 @@ def test_accept_jump_with_scattered_values_is_never_confirmed():
         ok, _ = mr._accept(100.2 + (i % 2) * 0.3, state)
         assert not ok
 
+def test_accept_small_decrease_confirmed_after_consecutive_reads():
+    # A state that sits slightly above the dials would otherwise reject every
+    # reading until real consumption catches up.
+    state = {"last_reading": 100.0}
+    for _ in range(mr.CONFIRM_COUNT - 1):
+        ok, reason = mr._accept(100.0 - mr.MAX_STEP, state)
+        assert not ok
+        assert "pending" in reason
+    ok, reason = mr._accept(100.0 - mr.MAX_STEP, state)
+    assert ok
+    assert "confirmed" in reason
+    assert "pending_reading" not in state
+
+def test_accept_decrease_beyond_max_step_is_never_confirmed():
+    state = {"last_reading": 100.0}
+    for _ in range(mr.CONFIRM_COUNT * 2):
+        ok, _ = mr._accept(100.0 - mr.MAX_STEP - 0.01, state)
+        assert not ok
+
+def test_accept_scattered_decreases_are_never_confirmed():
+    state = {"last_reading": 100.0}
+    for i in range(mr.CONFIRM_COUNT * 3):
+        ok, _ = mr._accept(100.0 - 0.02 - (i % 2) * 0.03, state)
+        assert not ok
+
 def test_accept_normal_reading_clears_pending():
     state = {"last_reading": 100.0}
     _jump(state)

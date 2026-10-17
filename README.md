@@ -53,7 +53,7 @@ Key environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `CAM_SNAPSHOT_URL` | — | Camera snapshot endpoint |
-| `CONFIRM_COUNT` | `5` | Consecutive agreeing readings needed to accept a jump above `MAX_STEP` |
+| `CONFIRM_COUNT` | `5` | Consecutive agreeing readings needed to accept a jump above `MAX_STEP` or a decrease beyond `JITTER_TOLERANCE` (down to `MAX_STEP`) |
 | `CONFIRM_TOLERANCE` | `0.02` | Readings agree if within this of each other (m³) |
 | `FLOW_MAX_AGE` | — | Skip flow rate if gap since last reading exceeds this (seconds) |
 | `HA_TOKEN` | — | HA long-lived access token |
