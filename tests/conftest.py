@@ -16,6 +16,8 @@ _ENV = {
     "MAX_STEP": "0.05",
     "MAX_DELTA_CAP": "1.0",
     "JITTER_TOLERANCE": "0.010",
+    "CONFIRM_COUNT": "5",
+    "CONFIRM_TOLERANCE": "0.02",
     "STATE_FILE": "/tmp/test_meter_state.json",
 }
 

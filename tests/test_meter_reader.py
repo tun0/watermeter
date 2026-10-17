@@ -283,13 +283,15 @@ def test_validate_decrease_exceeds_jitter():
     assert not ok
     assert "jitter" in reason
 
-def test_validate_scales_with_elapsed(monkeypatch):
-    # Simulate a 30s gap (3 intervals) — allowed should be 3 × MAX_STEP
-    old_ts = time.time() - 30
-    state  = {"last_reading": 100.0, "last_reading_ts": old_ts}
-    allowed = mr.MAX_STEP * 3
-    ok, _  = mr.validate(100.0 + allowed, state)
-    assert ok
+def test_validate_gap_does_not_widen_allowance():
+    # A long gap since the last accepted reading (camera outage, or a run of
+    # rejections) must not widen the allowed step: noisy upward reads would
+    # otherwise ratchet the state up while downward noise stays rejected.
+    state = {"last_reading": 100.0, "last_reading_ts": time.time() - 600}
+    ok, reason = mr.validate(100.0 + mr.MAX_STEP + 0.001, state)
+    assert not ok
+    assert "exceeds allowed" in reason
+
 
 def test_validate_cap_limits_scaled_delta(monkeypatch):
     # Very long gap, but cap prevents accepting unlimited delta
@@ -324,6 +326,78 @@ def test_rollover_complete_fires_when_driver_confirms_crossing():
     state  = {"last_reading": 310.9853}    # last_frac=0.9853 >= ROLLOVER_START
     result = mr.rollover_coverage([0, 0, 3, 1, 0], angles, state)
     assert result == [0, 0, 3, 1, 1]       # D4 advanced: reading becomes 311.x
+
+
+# ── _accept: confirmation of large jumps ──────────────────────────────────────
+
+def _jump(state, delta=0.3):
+    return mr._accept(state["last_reading"] + delta, state)
+
+def test_accept_normal_reading_passes_through():
+    state = {"last_reading": 100.0}
+    ok, _ = mr._accept(100.02, state)
+    assert ok
+
+def test_accept_jump_needs_consecutive_confirmations():
+    state = {"last_reading": 100.0}
+    for _ in range(mr.CONFIRM_COUNT - 1):
+        ok, reason = _jump(state)
+        assert not ok
+        assert "pending" in reason
+    ok, reason = _jump(state)
+    assert ok
+    assert "confirmed" in reason
+    assert "pending_reading" not in state
+
+def test_accept_flickering_jump_is_never_confirmed():
+    # Dial misreads alternate between a high and a low mode; the low read is a
+    # decrease and breaks the run of agreeing high reads.
+    state = {"last_reading": 100.0}
+    for _ in range(mr.CONFIRM_COUNT * 3):
+        ok, _ = mr._accept(100.3, state)
+        assert not ok
+        ok, _ = mr._accept(99.5, state)
+        assert not ok
+
+def test_accept_jump_with_scattered_values_is_never_confirmed():
+    state = {"last_reading": 100.0}
+    for i in range(mr.CONFIRM_COUNT * 3):
+        ok, _ = mr._accept(100.2 + (i % 2) * 0.3, state)
+        assert not ok
+
+def test_accept_normal_reading_clears_pending():
+    state = {"last_reading": 100.0}
+    _jump(state)
+    ok, _ = mr._accept(100.01, state)
+    assert ok
+    assert "pending_reading" not in state
+
+def test_accept_jump_at_cap_is_never_confirmed():
+    state = {"last_reading": 100.0}
+    for _ in range(mr.CONFIRM_COUNT * 2):
+        ok, _ = mr._accept(100.0 + mr.MAX_DELTA_CAP, state)
+        assert not ok
+
+
+# ── _run_once ─────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def run_once_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(mr, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(mr, "_fetch_image", lambda path: (None, None))
+
+def _reading(monkeypatch, value):
+    monkeypatch.setattr(mr, "process", lambda img, debug=False, state=None:
+                        (value, [0, 0, 1, 0, 0], [0.0, 0.0, 0.0], [0, 0, 1, 0, 0]))
+
+def test_run_once_confirms_jump_across_cycles(run_once_state, monkeypatch):
+    # pending_* must survive between cycles (each cycle reloads the state file).
+    mr.save_state({"last_reading": 100.0})
+    _reading(monkeypatch, 100.3)
+    for _ in range(mr.CONFIRM_COUNT - 1):
+        assert mr._run_once(None, False, False) is None
+    assert mr._run_once(None, False, False) == 100.3
+    assert mr.load_state()["last_reading"] == 100.3
 
 
 # ── .env.dist completeness ────────────────────────────────────────────────────

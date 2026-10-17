@@ -107,8 +107,10 @@ Validation
 Each reading is validated against the previous accepted value before being
 published.
 
-  Increases up to MAX_STEP per reading interval are accepted. For gaps longer
-  than one interval the limit scales with elapsed time, capped at MAX_DELTA_CAP.
+  Increases up to MAX_STEP per reading are accepted, regardless of how long
+  ago the last accepted reading was. A larger increase (below MAX_DELTA_CAP) is
+  accepted only once CONFIRM_COUNT consecutive readings agree within
+  CONFIRM_TOLERANCE; a flickering dial misread never does.
 
   Decreases within JITTER_TOLERANCE are accepted (dials can settle slightly
   backward after flow stops). Larger decreases are rejected as errors.
@@ -116,8 +118,8 @@ published.
   Readings outside these bounds are dropped; the previous value is retained
   and the event is logged.
 
-State persists two fields: last_reading and last_reading_ts (Unix timestamp).
-Both are required for the scaled delta check and flow rate calculation.
+State persists last_reading and last_reading_ts (Unix timestamp, used for the
+flow rate), plus the pending_* fields of an unconfirmed jump.
 
 
 Goals

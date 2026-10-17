@@ -110,6 +110,8 @@ READING_INTERVAL = float(_env("READING_INTERVAL"))
 MAX_STEP         = float(_env("MAX_STEP"))
 MAX_DELTA_CAP    = float(_env("MAX_DELTA_CAP"))
 JITTER_TOLERANCE = float(_env("JITTER_TOLERANCE"))
+CONFIRM_COUNT     = int(_env("CONFIRM_COUNT"))
+CONFIRM_TOLERANCE = float(_env("CONFIRM_TOLERANCE"))
 
 # Snapshots (optional — disabled when SNAPSHOT_DIR is unset)
 SNAPSHOT_DIR          = os.environ.get("SNAPSHOT_DIR")
@@ -451,25 +453,52 @@ def validate(new_val: float, state: dict) -> tuple[bool, str]:
     if last is None:
         return True, "first reading"
 
-    last_ts = state.get("last_reading_ts")
-    if last_ts is not None:
-        elapsed = time.time() - last_ts
-        allowed = min(MAX_STEP * max(elapsed, READING_INTERVAL) / READING_INTERVAL,
-                      MAX_DELTA_CAP)
-    else:
-        allowed = MAX_STEP
-
     delta = new_val - last
     if delta >= MAX_DELTA_CAP:
         return False, (f"jump {delta:+.4f} exceeds cap {MAX_DELTA_CAP:.4f} "
                        f"({last:.4f} → {new_val:.4f})")
-    if delta > allowed:
-        return False, (f"jump {delta:+.4f} exceeds allowed {allowed:.4f} "
+    if delta > MAX_STEP:
+        return False, (f"jump {delta:+.4f} exceeds allowed {MAX_STEP:.4f} "
                        f"({last:.4f} → {new_val:.4f})")
     if delta < -JITTER_TOLERANCE:
         return False, (f"decrease {delta:+.4f} exceeds jitter tolerance "
                        f"({last:.4f} → {new_val:.4f})")
     return True, "ok"
+
+
+def _clear_pending(state: dict) -> None:
+    state.pop("pending_reading", None)
+    state.pop("pending_count", None)
+
+
+def _accept(new_val: float, state: dict) -> tuple[bool, str]:
+    """validate(), plus confirmation of jumps above MAX_STEP.
+
+    A jump is accepted once CONFIRM_COUNT consecutive readings agree within
+    CONFIRM_TOLERANCE. Dial misreads flicker between modes and never agree for
+    that long; real consumption after a gap does. Mutates the pending_* keys.
+    """
+    ok, reason = validate(new_val, state)
+    if ok:
+        _clear_pending(state)
+        return True, reason
+
+    delta = new_val - state["last_reading"]
+    if not MAX_STEP < delta < MAX_DELTA_CAP:
+        _clear_pending(state)
+        return False, reason
+
+    pending = state.get("pending_reading")
+    if pending is not None and abs(new_val - pending) <= CONFIRM_TOLERANCE:
+        count = state.get("pending_count", 1) + 1
+    else:
+        count = 1
+    if count >= CONFIRM_COUNT:
+        _clear_pending(state)
+        return True, f"confirmed jump {delta:+.4f} after {count} agreeing reads"
+    state["pending_reading"] = new_val
+    state["pending_count"] = count
+    return False, f"{reason} (pending {count}/{CONFIRM_COUNT})"
 
 
 # ── Debug annotation ───────────────────────────────────────────────────────────
@@ -707,10 +736,14 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
             push_to_ha(reading)
         return reading
 
-    ok, reason = validate(reading, state)
+    ok, reason = _accept(reading, state)
     if not ok:
         log.warning("Rejected: %s", reason)
+        if last_reading is None:
+            save_state(state)
         return None
+    if "confirmed" in reason:
+        log.info("%s", reason)
 
     now      = time.time()
     last_ts  = state.get("last_reading_ts")
