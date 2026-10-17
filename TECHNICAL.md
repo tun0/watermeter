@@ -119,7 +119,9 @@ published.
   and the event is logged.
 
 State persists last_reading and last_reading_ts (Unix timestamp, used for the
-flow rate), plus the pending_* fields of an unconfirmed jump.
+flow rate), plus failed_streak (consecutive cycles without an accepted reading,
+published as sensor.water_meter_failed_cycles) and the pending_* fields of an
+unconfirmed jump.
 
 
 Goals

@@ -610,6 +610,25 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
             log.warning("HA push failed (%s): %s", entity_id, e)
 
 
+def push_failed_streak_to_ha(streak: int) -> None:
+    """Publish the number of consecutive cycles without an accepted reading."""
+    if not HA_URL or not HA_TOKEN:
+        return
+    try:
+        resp = requests.post(
+            f"{HA_URL}/api/states/sensor.water_meter_failed_cycles",
+            json={"state": str(streak),
+                  "attributes": {"state_class": "measurement",
+                                 "friendly_name": "Water Meter Failed Cycles"}},
+            headers={"Authorization": f"Bearer {HA_TOKEN}",
+                     "Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("HA push failed (failed_cycles): %s", e)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def process(img: np.ndarray, debug: bool = False,
@@ -714,6 +733,15 @@ def _prune_snapshots() -> None:
         log.info("pruned %d snapshots older than %.1f days", pruned, SNAPSHOT_MAX_AGE_DAYS)
 
 
+def _record_failure(state: dict, persist: bool, push: bool) -> None:
+    """Count a cycle that produced no accepted reading (fetch error or rejection)."""
+    state["failed_streak"] = state.get("failed_streak", 0) + 1
+    if persist:
+        save_state(state)
+    if push:
+        push_failed_streak_to_ha(state["failed_streak"])
+
+
 def _run_once(image_path: str | None, debug: bool, no_guard: bool,
               last_reading: float | None = None, push: bool = False) -> float | None:
     """Fetch, process, validate, and optionally push. Returns accepted reading or None."""
@@ -728,6 +756,7 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
             _save_snapshot(raw_jpeg, img, digital, raw_angles, ocr_digital)
     except (ValueError, RuntimeError, requests.exceptions.RequestException) as e:
         log.error("%s", e)
+        _record_failure(state, persist=last_reading is None, push=push)
         return None
 
     if no_guard:
@@ -739,8 +768,7 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
     ok, reason = _accept(reading, state)
     if not ok:
         log.warning("Rejected: %s", reason)
-        if last_reading is None:
-            save_state(state)
+        _record_failure(state, persist=last_reading is None, push=push)
         return None
     if "confirmed" in reason:
         log.info("%s", reason)
@@ -761,11 +789,13 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
 
     state["last_reading"]    = reading
     state["last_reading_ts"] = now
+    state["failed_streak"]   = 0
     save_state(state)
     flow_str = f"{flow_lpm:.3f} L/min" if flow_lpm is not None else "n/a"
     log.info("accepted reading=%.4f  flow=%s", reading, flow_str)
     if push:
         push_to_ha(reading, flow_lpm)
+        push_failed_streak_to_ha(0)
     return reading
 
 

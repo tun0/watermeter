@@ -400,6 +400,42 @@ def test_run_once_confirms_jump_across_cycles(run_once_state, monkeypatch):
     assert mr.load_state()["last_reading"] == 100.3
 
 
+# ── _run_once: failed-cycle streak ────────────────────────────────────────────
+
+@pytest.fixture
+def run_once_env(run_once_state, monkeypatch):
+    pushed = []
+    monkeypatch.setattr(mr, "push_to_ha", lambda *a, **k: None)
+    monkeypatch.setattr(mr, "push_failed_streak_to_ha", pushed.append)
+    return pushed
+
+def test_run_once_counts_rejections_and_resets_on_accept(run_once_env, monkeypatch):
+    mr.save_state({"last_reading": 100.0})
+    _reading(monkeypatch, 99.0)
+    assert mr._run_once(None, False, False, push=True) is None
+    assert mr._run_once(None, False, False, push=True) is None
+    assert mr.load_state()["failed_streak"] == 2
+    _reading(monkeypatch, 100.01)
+    assert mr._run_once(None, False, False, push=True) == 100.01
+    assert mr.load_state()["failed_streak"] == 0
+    assert run_once_env == [1, 2, 0]
+
+def test_run_once_counts_fetch_errors(run_once_env, monkeypatch):
+    mr.save_state({"last_reading": 100.0})
+    def boom(path):
+        raise mr.requests.exceptions.ConnectionError("camera down")
+    monkeypatch.setattr(mr, "_fetch_image", boom)
+    assert mr._run_once(None, False, False, push=True) is None
+    assert mr.load_state()["failed_streak"] == 1
+    assert run_once_env == [1]
+
+def test_run_once_last_reading_override_is_not_persisted_on_rejection(run_once_env, monkeypatch):
+    mr.save_state({"last_reading": 50.0})
+    _reading(monkeypatch, 99.0)
+    assert mr._run_once(None, False, False, last_reading=100.0) is None
+    assert mr.load_state()["last_reading"] == 50.0
+
+
 # ── .env.dist completeness ────────────────────────────────────────────────────
 
 def test_env_dist_covers_all_required_vars():
