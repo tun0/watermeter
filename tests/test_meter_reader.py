@@ -425,6 +425,24 @@ def test_run_once_confirms_jump_across_cycles(run_once_state, monkeypatch):
     assert mr.load_state()["last_reading"] == 100.3
 
 
+def test_run_once_does_not_lower_reading_within_jitter(run_once_state, monkeypatch):
+    # A decrease inside JITTER_TOLERANCE is dial noise. It is accepted (not a
+    # failure) but must not be published: total_increasing sensors record every
+    # decrease as negative consumption in the energy dashboard.
+    mr.save_state({"last_reading": 100.0})
+    _reading(monkeypatch, 100.0 - mr.JITTER_TOLERANCE / 2)
+    assert mr._run_once(None, False, False) == 100.0
+    assert mr.load_state()["last_reading"] == 100.0
+
+def test_run_once_confirmed_decrease_still_lowers_reading(run_once_state, monkeypatch):
+    # A state stuck above the dials has to be able to come down.
+    mr.save_state({"last_reading": 100.0})
+    _reading(monkeypatch, 100.0 - mr.MAX_STEP)
+    for _ in range(mr.CONFIRM_COUNT - 1):
+        assert mr._run_once(None, False, False) is None
+    assert mr._run_once(None, False, False) == 100.0 - mr.MAX_STEP
+
+
 # ── _run_once: failed-cycle streak ────────────────────────────────────────────
 
 @pytest.fixture

@@ -779,6 +779,8 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
     now      = time.time()
     last_ts  = state.get("last_reading_ts")
     last_val = state.get("last_reading")
+    if reason == "ok" and last_val is not None and reading < last_val:
+        reading = last_val   # jitter: don't publish a decrease (negative consumption in HA)
     flow_lpm = None
     if last_val is not None and last_ts is not None:
         elapsed = now - last_ts

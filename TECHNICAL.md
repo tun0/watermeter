@@ -115,7 +115,9 @@ published.
   dials corrects itself instead of rejecting every reading.
 
   Decreases within JITTER_TOLERANCE are accepted (dials can settle slightly
-  backward after flow stops). Larger decreases are rejected as errors.
+  backward after flow stops) but the previous value is kept, so the published
+  reading never goes down by noise alone. Larger decreases are rejected as
+  errors.
 
   Readings outside these bounds are dropped; the previous value is retained
   and the event is logged.
