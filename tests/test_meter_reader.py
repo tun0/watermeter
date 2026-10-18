@@ -72,9 +72,9 @@ def test_dial_corrected_advance_on_missed_crossing(zero_offsets):
 
 def test_dial_corrected_retreat_on_early_crossing(zero_offsets):
     # A0 reads digit 4, sub=0.02 — just crossed into digit 4.
-    # Driver A1 at expected_sub=0.98 — says A0 hasn't crossed yet.
-    # diff = 0.02 - 0.98 = -0.96 < -0.5 → retreat to digit 3.
-    angles = [4 * 36 + 0.02 * 36, 0.98 * 360, 0.0, 0.0]
+    # Driver A1 at 9.8 digits (A2 at 8.0 digits gives A1 its 0.8 fraction) — A0's
+    # fraction is 0.98, so A0 hasn't crossed yet → retreat to digit 3.
+    angles = [4 * 36 + 0.02 * 36, 0.98 * 360, 8 * 36, 0.0]
     assert mr.dial_corrected_digit(0, angles) == 3
 
 def test_dial_corrected_no_correction_near_boundary(zero_offsets):
@@ -100,6 +100,13 @@ def test_dial_corrected_cascade_a1_uses_a2(zero_offsets):
     # A1 reads digit 2, sub=0.98; A2 at expected_sub=0.02 → advance A1 to digit 3.
     angles = [0.0, 2 * 36 + 0.98 * 36, 0.02 * 360, 0.0]
     assert mr.dial_corrected_digit(1, angles) == 3
+
+
+def test_dial_digits_stable_while_a1_rests_on_its_zero_mark():
+    # Observed while A1 sat on its zero mark (raw 268-271°): A2 (290°) places A1 just past
+    # zero, so A0 must follow A1's resolved position and read 7, whatever A1's jitter.
+    for a1 in (268.0, 269.0, 270.0, 271.0):
+        assert mr.resolve_digits([18.0, a1, 290.0]) == [7, 0, 0]
 
 
 # ── assemble_reading ──────────────────────────────────────────────────────────

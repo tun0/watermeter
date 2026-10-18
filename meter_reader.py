@@ -299,49 +299,36 @@ def corrected_digit(corr: float) -> int:
 # ── Inter-dial correction ──────────────────────────────────────────────────────
 #
 # The gear relationship: A(n+1) drives A(n) at a 10:1 ratio, so every full
-# revolution of A(n+1) advances A(n) by exactly one digit. This means
-# A(n+1)'s position within its own revolution directly predicts how far A(n)
-# should be within its current digit:
+# revolution of A(n+1) advances A(n) by exactly one digit. A(n+1)'s position
+# within its own revolution therefore is A(n)'s position within its current
+# digit (0.0 = just entered, 1.0 = about to leave).
 #
-#   expected_sub = corrected_angle(n+1) / 360
-#
-# Both values are in [0.0, 1.0). In normal operation they match closely.
-# When they differ by more than 0.5, the camera has almost certainly read the
-# wrong digit for A(n) — the driver is more reliable. Pick the adjacent digit
-# that is consistent with the driver.
+# Digits are resolved from the finest dial up. A(n)'s digit is the integer
+# closest to (its own position - that fraction), and its resolved position
+# (digit + fraction) is what drives A(n-1). Each dial thus follows its finer
+# neighbour's carry, so two dials can never disagree about a crossing.
+
+def resolve_digits(raw_angles: list[float | None]) -> list[int]:
+    """Digit 0–9 for every dial, A0..An, resolved finest-first through the gears."""
+    digits = [0] * len(raw_angles)
+    pos    = None   # resolved position of the next finer dial, in digits [0, 10]
+    for i in reversed(range(len(raw_angles))):
+        if raw_angles[i] is None:
+            pos = None   # no driver for the next coarser dial: it falls back to the camera
+            continue
+        u = corrected_angle(raw_angles[i], DIAL_ZERO_OFFSETS[i]) / 36.0   # camera position, 0–10
+        if pos is None:
+            digits[i], pos = int(u) % 10, u
+        else:
+            f         = pos / 10.0
+            digits[i] = math.floor(u - f + 0.5) % 10
+            pos       = digits[i] + f
+    return digits
+
 
 def dial_corrected_digit(n: int, raw_angles: list[float | None]) -> int:
-    """Return the best digit for dial n, cross-checked against the driver dial n+1."""
-    raw = raw_angles[n]
-    if raw is None:
-        return 0
-
-    corr = corrected_angle(raw, DIAL_ZERO_OFFSETS[n])
-    k    = int(corr / 36.0) % 10   # digit from camera (0–9)
-    sub  = (corr / 36.0) % 1.0     # how far into that digit (0.0 = just entered, 1.0 = about to leave)
-
-    # Without a driver we have no cross-check, so trust the camera reading.
-    if n + 1 >= len(raw_angles) or raw_angles[n + 1] is None:
-        return k
-
-    # expected_sub: where the driver says A(n) should be within its digit.
-    driver_corr  = corrected_angle(raw_angles[n + 1], DIAL_ZERO_OFFSETS[n + 1])
-    expected_sub = driver_corr / 360.0
-
-    # diff > 0 means the camera placed A(n) further along its digit than the driver expects.
-    # diff < 0 means the camera placed A(n) earlier than expected.
-    diff = sub - expected_sub
-
-    if diff > 0.5:
-        # Camera sees A(n) near the END of digit k, but driver says it should be near the
-        # START of its digit. This means A(n) just crossed into a new digit and the camera
-        # missed it — the correct digit is k+1.
-        return (k + 1) % 10
-    if diff < -0.5:
-        # Camera sees A(n) near the START of digit k, but driver says it should be near the
-        # END of its digit. This means A(n) hasn't crossed yet — the correct digit is k-1.
-        return (k - 1 + 10) % 10
-    return k
+    """Return the resolved digit for dial n."""
+    return resolve_digits(raw_angles)[n]
 
 
 # ── Reading assembly ───────────────────────────────────────────────────────────
@@ -354,9 +341,7 @@ def assemble_reading(digital: list[int | None],
         raise ValueError(f"Needle detection failure — angles: {raw_angles}")
 
     integer_part = int("".join(str(d) for d in digital))
-    n            = len(raw_angles)
-    # Each dial is corrected independently using its own driver — no carry propagation needed.
-    digits       = [dial_corrected_digit(i, raw_angles) for i in range(n)]
+    digits       = resolve_digits(raw_angles)
     fractional   = sum(d * 10 ** -(i + 1) for i, d in enumerate(digits))
     return round(integer_part + fractional, 4)
 
@@ -367,10 +352,7 @@ def corrected_fraction(raw_angles: list[float | None]) -> float | None:
     """Analog fraction A0/10 + A1/100 + A2/1000 + A3/10000, with inter-dial correction."""
     if any(a is None for a in raw_angles):
         return None
-    total = sum(
-        dial_corrected_digit(i, raw_angles) * 10 ** -(i + 1)
-        for i in range(len(raw_angles))
-    )
+    total = sum(d * 10 ** -(i + 1) for i, d in enumerate(resolve_digits(raw_angles)))
     return round(total, 4)
 
 
