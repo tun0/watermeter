@@ -113,6 +113,10 @@ JITTER_TOLERANCE = float(_env("JITTER_TOLERANCE"))
 CONFIRM_COUNT     = int(_env("CONFIRM_COUNT"))
 CONFIRM_TOLERANCE = float(_env("CONFIRM_TOLERANCE"))
 
+# Camera shift monitor: compare a frame with the stored reference every N seconds
+REFERENCE_IMAGE      = _env("REFERENCE_IMAGE")
+SHIFT_CHECK_INTERVAL = float(_env("SHIFT_CHECK_INTERVAL"))
+
 # Snapshots (optional — disabled when SNAPSHOT_DIR is unset)
 SNAPSHOT_DIR          = os.environ.get("SNAPSHOT_DIR")
 _max_age              = os.environ.get("SNAPSHOT_MAX_AGE_DAYS")
@@ -595,6 +599,25 @@ def push_to_ha(reading: float, flow_lpm: float | None = None) -> None:
             log.warning("HA push failed (%s): %s", entity_id, e)
 
 
+def push_camera_shift_to_ha(shift_px: float) -> None:
+    """Publish how far the camera has moved relative to the reference frame."""
+    if not HA_URL or not HA_TOKEN:
+        return
+    try:
+        resp = requests.post(
+            f"{HA_URL}/api/states/sensor.water_meter_camera_shift_px",
+            json={"state": f"{shift_px:.2f}",
+                  "attributes": {"unit_of_measurement": "px", "state_class": "measurement",
+                                 "friendly_name": "Water Meter Camera Shift"}},
+            headers={"Authorization": f"Bearer {HA_TOKEN}",
+                     "Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("HA push failed (camera_shift_px): %s", e)
+
+
 def push_failed_streak_to_ha(streak: int) -> None:
     """Publish the number of consecutive cycles without an accepted reading."""
     if not HA_URL or not HA_TOKEN:
@@ -718,6 +741,39 @@ def _prune_snapshots() -> None:
         log.info("pruned %d snapshots older than %.1f days", pruned, SNAPSHOT_MAX_AGE_DAYS)
 
 
+_last_shift_check = 0.0
+
+
+def camera_shift_px(img: np.ndarray, ref: np.ndarray) -> float:
+    """Translation of img relative to ref in pixels (phase correlation on blurred greyscale)."""
+    def prep(x: np.ndarray) -> np.ndarray:
+        return cv2.GaussianBlur(cv2.cvtColor(x, cv2.COLOR_BGR2GRAY).astype(np.float32), (0, 0), 3)
+    h, w = ref.shape[:2]
+    (dx, dy), _ = cv2.phaseCorrelate(prep(ref), prep(img), cv2.createHanningWindow((w, h), cv2.CV_32F))
+    return math.hypot(dx, dy)
+
+
+def _check_camera_shift(img: np.ndarray) -> None:
+    """Every SHIFT_CHECK_INTERVAL: publish the camera shift versus the reference frame.
+
+    The first frame seen becomes the reference; delete the file after a remount or
+    recalibration to start over. Never raises: the reading matters more.
+    """
+    global _last_shift_check
+    if time.time() - _last_shift_check < SHIFT_CHECK_INTERVAL:
+        return
+    _last_shift_check = time.time()
+    try:
+        ref = cv2.imread(REFERENCE_IMAGE)
+        if ref is None:
+            cv2.imwrite(REFERENCE_IMAGE, img)
+            log.info("camera shift: saved reference frame %s", REFERENCE_IMAGE)
+            return
+        push_camera_shift_to_ha(camera_shift_px(img, ref))
+    except Exception as e:
+        log.warning("camera shift check failed: %s", e)
+
+
 def _record_failure(state: dict, persist: bool, push: bool) -> None:
     """Count a cycle that produced no accepted reading (fetch error or rejection)."""
     state["failed_streak"] = state.get("failed_streak", 0) + 1
@@ -743,6 +799,9 @@ def _run_once(image_path: str | None, debug: bool, no_guard: bool,
         log.error("%s", e)
         _record_failure(state, persist=last_reading is None, push=push)
         return None
+
+    if push:
+        _check_camera_shift(img)
 
     if no_guard:
         print(f"{reading:.4f}")

@@ -8,11 +8,14 @@ The .env.dist completeness test verifies that every _env() call in the module
 has a corresponding entry in .env.dist, and that loading .env.dist values (plus
 a dummy CAM_SNAPSHOT_URL) is sufficient to initialise the module.
 """
+import math
 import os
 import re
 import time
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
 import meter_reader as mr
@@ -484,6 +487,68 @@ def test_run_once_last_reading_override_is_not_persisted_on_rejection(run_once_e
     _reading(monkeypatch, 99.0)
     assert mr._run_once(None, False, False, last_reading=100.0) is None
     assert mr.load_state()["last_reading"] == 50.0
+
+
+# ── camera shift monitor ──────────────────────────────────────────────────────
+
+def _textured(seed=0, shape=(480, 640)):
+    # Structured like a photo (edges at many scales); smooth noise biases phase correlation.
+    rng = np.random.default_rng(seed)
+    img = np.full(shape, 128, np.uint8)
+    for _ in range(120):
+        x, y = int(rng.integers(0, shape[1])), int(rng.integers(0, shape[0]))
+        cv2.circle(img, (x, y), int(rng.integers(3, 40)), int(rng.integers(0, 255)), -1)
+        cv2.line(img, (x, y), (int(rng.integers(0, shape[1])), int(rng.integers(0, shape[0]))),
+                 int(rng.integers(0, 255)), int(rng.integers(1, 4)))
+    return cv2.cvtColor(cv2.GaussianBlur(img, (0, 0), 1.5), cv2.COLOR_GRAY2BGR)
+
+def _moved(img, dx, dy):
+    m = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(img, m, (img.shape[1], img.shape[0]), borderMode=cv2.BORDER_REFLECT)
+
+def test_camera_shift_px_identical_frames():
+    img = _textured()
+    assert mr.camera_shift_px(img, img) < 0.1
+
+def test_camera_shift_px_measures_translation():
+    img = _textured()
+    assert mr.camera_shift_px(_moved(img, 7, 3), img) == pytest.approx(math.hypot(7, 3), abs=0.7)
+
+@pytest.fixture
+def shift_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(mr, "REFERENCE_IMAGE", str(tmp_path / "reference.jpg"))
+    monkeypatch.setattr(mr, "_last_shift_check", 0.0)
+    pushed = []
+    monkeypatch.setattr(mr, "push_camera_shift_to_ha", pushed.append)
+    return pushed
+
+def test_check_camera_shift_saves_reference_when_missing(shift_env):
+    img = _textured()
+    mr._check_camera_shift(img)
+    assert os.path.exists(mr.REFERENCE_IMAGE)
+    assert shift_env == []          # nothing to compare with yet
+
+def test_check_camera_shift_publishes_shift(shift_env, monkeypatch):
+    img = _textured()
+    mr._check_camera_shift(img)
+    monkeypatch.setattr(mr, "_last_shift_check", 0.0)
+    mr._check_camera_shift(_moved(img, 12, 0))
+    assert len(shift_env) == 1
+    assert shift_env[0] == pytest.approx(12, abs=1.0)
+
+def test_check_camera_shift_runs_once_per_interval(shift_env, monkeypatch):
+    img = _textured()
+    mr._check_camera_shift(img)
+    monkeypatch.setattr(mr, "_last_shift_check", 0.0)
+    mr._check_camera_shift(img)
+    mr._check_camera_shift(img)     # within SHIFT_CHECK_INTERVAL: skipped
+    assert len(shift_env) == 1
+
+def test_check_camera_shift_survives_errors(shift_env, monkeypatch):
+    mr._check_camera_shift(_textured())
+    monkeypatch.setattr(mr, "_last_shift_check", 0.0)
+    mr._check_camera_shift(_textured(shape=(100, 100)))   # different size: phaseCorrelate raises
+    assert shift_env == []
 
 
 # ── .env.dist completeness ────────────────────────────────────────────────────

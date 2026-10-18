@@ -55,6 +55,8 @@ Key environment variables:
 | `CAM_SNAPSHOT_URL` | — | Camera snapshot endpoint |
 | `CONFIRM_COUNT` | `5` | Consecutive agreeing readings needed to accept a jump above `MAX_STEP` or a decrease beyond `JITTER_TOLERANCE` (down to `MAX_STEP`) |
 | `CONFIRM_TOLERANCE` | `0.02` | Readings agree if within this of each other (m³) |
+| `REFERENCE_IMAGE` | `/app/data/reference.jpg` | Reference frame for the camera shift monitor (first frame seen; delete to re-baseline) |
+| `SHIFT_CHECK_INTERVAL` | `600` | Seconds between camera shift checks (published as `sensor.water_meter_camera_shift_px`) |
 | `FLOW_MAX_AGE` | — | Skip flow rate if gap since last reading exceeds this (seconds) |
 | `HA_TOKEN` | — | HA long-lived access token |
 | `HA_URL` | — | Home Assistant base URL |

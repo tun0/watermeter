@@ -18,6 +18,8 @@ _ENV = {
     "JITTER_TOLERANCE": "0.010",
     "CONFIRM_COUNT": "5",
     "CONFIRM_TOLERANCE": "0.02",
+    "REFERENCE_IMAGE": "/tmp/test_meter_reference.jpg",
+    "SHIFT_CHECK_INTERVAL": "600",
     "STATE_FILE": "/tmp/test_meter_state.json",
 }
 

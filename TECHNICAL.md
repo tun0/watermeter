@@ -128,6 +128,18 @@ published as sensor.water_meter_failed_cycles) and the pending_* fields of an
 unconfirmed jump.
 
 
+Camera shift monitor
+--------------------
+
+The dial and digit crops are fixed pixel regions, so a camera that moves even
+slightly breaks the needle detection (a 15 px shift made the A1 detector flip
+between the pointer's tip and body). Every SHIFT_CHECK_INTERVAL the loop compares
+the frame with REFERENCE_IMAGE (phase correlation on blurred greyscale) and
+publishes the translation in pixels as sensor.water_meter_camera_shift_px. The
+first frame seen becomes the reference, so after a remount and recalibration
+delete the reference file (it lives on the data volume) to re-baseline.
+
+
 Goals
 -----
 
